@@ -3,7 +3,7 @@
   "appName": "Stir Crazy",
   "webDir": "www",
   "ios": {
-    "contentInset": "always",
+    "contentInset": "never",
     "scrollEnabled": true,
     "backgroundColor": "#fbf7f2"
   }
