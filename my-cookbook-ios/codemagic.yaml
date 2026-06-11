@@ -110,6 +110,7 @@ workflows:
           xcode-project build-ipa --workspace App.xcworkspace --scheme App \
             --archive-xcargs "CODE_SIGN_ENTITLEMENTS=App/App.entitlements"
     artifacts:
+      - ios/App/build/ios/ipa/*.ipa
       - my-cookbook-ios/ios/App/build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
     publishing:
