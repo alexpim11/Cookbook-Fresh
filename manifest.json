@@ -1,6 +1,6 @@
 {
-  "name": "My CookBook",
-  "short_name": "My CookBook",
+  "name": "Stir Crazy",
+  "short_name": "Stir Crazy",
   "description": "Personal recipe collection, meal planner, and shopping list.",
   "start_url": "./cookbook-fresh.html",
   "scope": "./",

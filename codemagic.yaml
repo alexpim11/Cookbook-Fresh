@@ -1,0 +1,120 @@
+workflows:
+  ios-unsigned-build:
+    name: iOS unsigned verification build
+    instance_type: mac_mini_m2
+    max_build_duration: 30
+    working_directory: my-cookbook-ios
+    environment:
+      node: 20
+      xcode: latest
+      cocoapods: default
+    cache:
+      cache_paths:
+        - $HOME/Library/Caches/CocoaPods
+        - $CM_BUILD_DIR/node_modules
+    scripts:
+      - name: Install npm dependencies
+        script: |
+          npm install
+      - name: Add iOS platform if missing
+        script: |
+          if [ ! -d "ios" ]; then
+            npx cap add ios
+          fi
+          npx cap sync ios
+      - name: Install CocoaPods
+        script: |
+          cd ios/App
+          pod install --repo-update
+      - name: Build unsigned .app
+        script: |
+          cd ios/App
+          xcodebuild \
+            -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+    artifacts:
+      - my-cookbook-ios/ios/App/build/Build/Products/Debug-iphonesimulator/App.app
+
+  # ============================================================
+  # SIGNED BUILD — switch to this workflow once you have:
+  #   1. Apple Developer Program account
+  #   2. App Store Connect API key uploaded to Codemagic
+  #   3. App ID registered (matching com.alex.mycookbook below)
+  # In Codemagic UI, go to App settings → iOS code signing → Automatic.
+  # ============================================================
+  ios-testflight:
+    name: iOS signed build + TestFlight upload
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    working_directory: my-cookbook-ios
+    environment:
+      node: 20
+      xcode: latest
+      cocoapods: default
+      ios_signing:
+        # Set up in Codemagic UI; this references the credentials you upload there.
+        distribution_type: app_store
+        bundle_identifier: com.alex.mycookbook
+      vars:
+        APP_STORE_APP_ID: ""  # fill in once App ID is registered
+    integrations:
+      app_store_connect: codemagic
+    scripts:
+      - name: Install npm dependencies
+        script: npm install
+      - name: Add iOS platform if missing
+        script: |
+          if [ ! -d "ios" ]; then
+            npx cap add ios
+          fi
+          npx cap sync ios
+      - name: Install CocoaPods
+        script: |
+          cd ios/App
+          pod install --repo-update
+      - name: Initialize keychain & fetch signing files
+        script: |
+          keychain initialize
+          app-store-connect fetch-signing-files "$BUNDLE_IDENTIFIER" \
+            --type IOS_APP_STORE \
+            --create
+          keychain add-certificates
+          xcode-project use-profiles
+      - name: Increment build number
+        script: |
+          cd ios/App
+          LATEST_BUILD_NUMBER=$(app-store-connect get-latest-app-store-build-number "$APP_STORE_APP_ID" || echo 0)
+          agvtool new-version -all $(($LATEST_BUILD_NUMBER + 1))
+      - name: Add Sign in with Apple entitlement
+        script: |
+          cat > ios/App/App/App.entitlements <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.developer.applesignin</key>
+            <array><string>Default</string></array>
+          </dict>
+          </plist>
+          PLIST
+      - name: Build signed .ipa
+        script: |
+          cd ios/App
+          xcode-project build-ipa --workspace App.xcworkspace --scheme App \
+            --archive-xcargs "CODE_SIGN_ENTITLEMENTS=App/App.entitlements"
+    artifacts:
+      - my-cookbook-ios/ios/App/build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        beta_groups:
+          - App Store Connect Users
