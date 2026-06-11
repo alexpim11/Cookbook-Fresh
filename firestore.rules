@@ -1,0 +1,44 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Real accounts only — anonymous sessions are no longer allowed.
+    function signedIn() {
+      return request.auth != null
+        && request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
+
+    // Each user can read/write only their own profile doc.
+    match /users/{uid} {
+      allow read, write: if signedIn() && request.auth.uid == uid;
+    }
+
+    // Households. The 8-char doc ID is the share code and acts as the key:
+    // any signed-in user who knows the code can read the doc (that's how
+    // joining works), but only members can be in the doc's members map.
+    match /households/{code} {
+      // Direct lookup by code is allowed; listing/searching is not.
+      allow get: if signedIn();
+      allow list: if false;
+      // Creating: you must put yourself in the members map.
+      allow create: if signedIn() && request.auth.uid in request.resource.data.members;
+      // Updating: you're already a member (edits, leaving) or you're adding
+      // yourself as one (joining with the code / accepting an invite).
+      allow update: if signedIn()
+        && (request.auth.uid in resource.data.members
+            || request.auth.uid in request.resource.data.members);
+      allow delete: if signedIn() && request.auth.uid in resource.data.members;
+    }
+
+    // Invites. Readable/deletable by the inviter and by whoever owns the
+    // invited email address (matched against the signed-in account's email).
+    match /invites/{inviteId} {
+      allow create: if signedIn()
+        && request.resource.data.invitedBy.uid == request.auth.uid
+        && request.resource.data.status == 'pending';
+      allow read, update, delete: if signedIn()
+        && (resource.data.email == request.auth.token.email.lower()
+            || resource.data.invitedBy.uid == request.auth.uid);
+    }
+  }
+}
