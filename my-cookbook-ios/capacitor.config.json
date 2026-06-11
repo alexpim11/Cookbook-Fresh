@@ -1,0 +1,10 @@
+{
+  "appId": "com.alex.mycookbook",
+  "appName": "Stir Crazy",
+  "webDir": "www",
+  "ios": {
+    "contentInset": "always",
+    "scrollEnabled": true,
+    "backgroundColor": "#fbf7f2"
+  }
+}
