@@ -2,7 +2,7 @@
  * Caches the app shell so it works offline once installed.
  * Bump CACHE_VERSION whenever you change the HTML and want users to get the update.
  */
-const CACHE_VERSION = 'cookbook-v14-auth';
+const CACHE_VERSION = 'cookbook-v15-auth-debug';
 const ASSETS = [
   './',
   './cookbook-fresh.html',
@@ -56,9 +56,4 @@ self.addEventListener('fetch', e => {
     e.respondWith(
       caches.match(e.request).then(cached => cached || fetch(e.request).then(resp => {
         const copy = resp.clone();
-        caches.open(CACHE_VERSION).then(c => c.put(e.request, copy));
-        return resp;
-      }))
-    );
-  }
-});
+        caches.open(CACHE_VERSION).then(c => c.put(e.reque

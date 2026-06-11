@@ -2052,7 +2052,10 @@ async function initFirebase() {
     _auth = firebase.auth();
     _firebaseReady = true;
     // Complete a pending Apple redirect sign-in, if any (web fallback flow)
-    _auth.getRedirectResult().catch(e => console.warn('Redirect sign-in failed', e));
+    _auth.getRedirectResult().catch(e => {
+      console.warn('Redirect sign-in failed', e);
+      window._redirectAuthError = e;   // surfaced when the modal opens
+    });
     _auth.onAuthStateChanged(handleAuthState);
   } catch (e) {
     console.error('Firebase init failed', e);
@@ -2162,6 +2165,15 @@ function authFriendlyError(e) {
   return map[code] || ((e && e.message) || String(e));
 }
 
+// Apple sign-in failures are config problems more often than user error —
+// show the raw Firebase code so they're diagnosable.
+function appleError(e) {
+  const code = (e && e.code) || '';
+  return 'Apple sign-in failed' + (code ? ' (' + code + ')' : '') + ': '
+    + ((e && e.message) || String(e))
+    + ' — if this mentions an invalid credential, double-check the Apple provider settings in Firebase (Services ID, Team ID, Key ID, .p8 key). See AUTH-SETUP.md step 3.';
+}
+
 function showAuthStatus(msg, isError) {
   const el = document.getElementById('authStatus');
   if (el) el.innerHTML = msg ? `<div class="${isError ? 'error' : 'notice'}" style="margin:10px 0 0;">${escapeHtml(msg)}</div>` : '';
@@ -2242,10 +2254,10 @@ async function signInWithApple() {
     if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') return;
     if (code === 'auth/popup-blocked' || code === 'auth/operation-not-supported-in-this-environment') {
       // Installed PWAs often block popups — fall back to a full-page redirect.
-      try { await _auth.signInWithRedirect(provider); } catch (e2) { showAuthStatus(authFriendlyError(e2), true); }
+      try { await _auth.signInWithRedirect(provider); } catch (e2) { showAuthStatus(appleError(e2), true); }
       return;
     }
-    showAuthStatus(authFriendlyError(e), true);
+    showAuthStatus(appleError(e), true);
   }
 }
 
@@ -2277,7 +2289,7 @@ async function signInWithAppleNative() {
     }
   } catch (e) {
     if (e && /cancel|1001/i.test((e.message || '') + (e.code || ''))) return; // user dismissed the sheet
-    showAuthStatus(authFriendlyError(e), true);
+    showAuthStatus(appleError(e), true);
   }
 }
 
@@ -2544,7 +2556,7 @@ function authModalBody() {
       <input type="password" id="authPassword" placeholder="${signup ? 'At least 6 characters' : 'Your password'}" autocomplete="${signup ? 'new-password' : 'current-password'}" onkeydown="if(event.key==='Enter') submitAuth()" />
     </div>
     ${signup ? '' : '<p style="margin:0; font-size:13px;"><a style="color:var(--ink-soft); cursor:pointer; text-decoration:underline;" onclick="authForgotPassword()">Forgot password?</a></p>'}
-    <div id="authStatus"></div>
+    <div id="authStatus">${window._redirectAuthError ? `<div class="error" style="margin:10px 0 0;">${escapeHtml(appleError(window._redirectAuthError))}</div>` : ''}</div>
     <button class="btn" style="width:100%; margin-top:14px;" onclick="submitAuth()">${signup ? 'Create account' : 'Sign in'}</button>
     <p class="auth-toggle">${signup
       ? 'Already have an account? <a onclick="setAuthMode(\'signin\')">Sign in</a>'
