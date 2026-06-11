@@ -2102,22 +2102,7 @@ async function setProfileHousehold(id) {
 // then a one-time claim of a pre-accounts household code stored locally.
 async function resolveHousehold() {
   const prof = await _db.collection('users').doc(_user.uid).get();
-  let hid = (prof.exists && prof.data().householdId) || null;
-  if (!hid) {
-    const legacy = localStorage.getItem(HOUSEHOLD_KEY);
-    if (legacy) {
-      try {
-        const snap = await _db.collection('households').doc(legacy).get();
-        if (snap.exists) {
-          await _db.collection('households').doc(legacy)
-            .update({ ['members.' + _user.uid]: memberEntry() });
-          await setProfileHousehold(legacy);
-          hid = legacy;
-        }
-      } catch (e) { console.warn('Legacy household claim failed', e); }
-      localStorage.removeItem(HOUSEHOLD_KEY);
-    }
-  }
+  const hid = (prof.exists && prof.data().householdId) || null;
   _householdId = hid;
   if (hid) subscribeToHousehold(hid);
 }
@@ -2348,10 +2333,14 @@ async function joinHouseholdByCode(id) {
   id = (id || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
   if (id.length !== 8) { alert('The code should be 8 characters.'); return; }
   if (!_user) return;
-  if (!confirmDataReplace()) return;
+  if (_householdId && id === _householdId) { alert('You\'re already in that household.'); return; }
   try {
     const snap = await _db.collection('households').doc(id).get();
     if (!snap.exists) { alert('No household with that code. Double-check the code with whoever shared it.'); return; }
+    if (_householdId) {
+      if (!confirm('Switch households? You\'ll leave your current one, and this device\'s data will be replaced by the new household\'s.')) return;
+      await leaveCurrentHouseholdQuietly();
+    } else if (!confirmDataReplace()) return;
     await _db.collection('households').doc(id).update({ ['members.' + _user.uid]: memberEntry() });
     await setProfileHousehold(id);
     _householdId = id;
@@ -2612,7 +2601,13 @@ function accountModalBody() {
       ${_sentInvites.length ? `
       <ul class="member-list" style="margin-top:10px;">
         ${_sentInvites.map(i => `<li><span style="flex:1;">${escapeHtml(i.email)} <span class="text-muted" style="font-size:12px;">— invited, waiting</span></span><button class="btn-secondary btn-small" onclick="cancelInvite('${escapeHtml(i.id)}')">Cancel</button></li>`).join('')}
-      </ul>` : ''}`;
+      </ul>` : ''}
+      <p style="margin:16px 0 6px; font-weight:600; font-size:14px;">Switch household</p>
+      <div class="household-row" style="margin-top:0;">
+        <input type="text" id="joinCodeInput" maxlength="8" placeholder="ABCD1234" autocomplete="off" onkeydown="if(event.key==='Enter') joinHouseholdByCode(this.value)" />
+        <button class="btn" onclick="joinHouseholdByCode(document.getElementById('joinCodeInput').value)">Join</button>
+      </div>
+      <p class="text-muted" style="font-size:12px; margin:6px 0 0;">Enter another household's code to leave this one and join it.</p>`;
   } else {
     html += `
       <p style="margin:8px 0 0;">Share recipes, meal plans, and the shopping list with your household.</p>
