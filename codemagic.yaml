@@ -58,12 +58,11 @@ workflows:
       node: 20
       xcode: latest
       cocoapods: default
-      ios_signing:
-        # Set up in Codemagic UI; this references the credentials you upload there.
-        distribution_type: app_store
-        bundle_identifier: com.alex.mycookbook
+      groups:
+        - appstore_credentials   # contains CERTIFICATE_PRIVATE_KEY (set in Codemagic UI)
       vars:
         APP_STORE_APP_ID: 6779255093
+        BUNDLE_ID: com.alex.mycookbook
     integrations:
       app_store_connect: codemagic
     scripts:
@@ -79,8 +78,14 @@ workflows:
         script: |
           cd ios/App
           pod install --repo-update
-      - name: Apply provisioning profiles
+      - name: Fetch or create signing files (verbose)
         script: |
+          keychain initialize
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --create \
+            --verbose
+          keychain add-certificates
           xcode-project use-profiles
       - name: Increment build number
         script: |
