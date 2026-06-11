@@ -104,6 +104,9 @@ workflows:
           </dict>
           </plist>
           PLIST
+      - name: Declare no non-exempt encryption (skips compliance question)
+        script: |
+          plutil -replace ITSAppUsesNonExemptEncryption -bool NO ios/App/App/Info.plist
       - name: Build signed .ipa
         script: |
           cd ios/App
@@ -117,5 +120,3 @@ workflows:
       app_store_connect:
         auth: integration
         submit_to_testflight: true
-        beta_groups:
-          - App Store Connect Users
