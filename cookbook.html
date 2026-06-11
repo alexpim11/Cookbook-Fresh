@@ -342,10 +342,11 @@
     display: flex; gap: 8px; align-items: center; margin-top: 12px;
   }
   .household-row input {
-    flex: 1; padding: 10px 14px; border: 1px solid var(--border);
+    flex: 1; min-width: 0; padding: 10px 14px; border: 1px solid var(--border);
     border-radius: 12px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
     font-size: 16px; letter-spacing: 2px; text-transform: uppercase;
   }
+  .household-row .btn { flex-shrink: 0; }
   @media (max-width: 720px) {
     .sync-btn { padding: 6px 12px; font-size: 12px; }
   }
@@ -375,7 +376,9 @@
   .member-list li {
     display: flex; align-items: center; gap: 8px; padding: 7px 0;
     border-bottom: 1px solid var(--border); font-size: 14px;
+    flex-wrap: wrap;
   }
+  .member-list li > span:first-child { min-width: 0; }
   .member-list li:last-child { border-bottom: none; }
   .invite-card {
     background: var(--surface-2); border-radius: 12px;
