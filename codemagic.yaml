@@ -63,7 +63,7 @@ workflows:
         distribution_type: app_store
         bundle_identifier: com.alex.mycookbook
       vars:
-        APP_STORE_APP_ID: ""  # fill in once App ID is registered
+        APP_STORE_APP_ID: 6779255093
     integrations:
       app_store_connect: codemagic
     scripts:
