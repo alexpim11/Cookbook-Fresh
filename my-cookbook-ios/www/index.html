@@ -2656,6 +2656,78 @@ function stripHtml(s) {
   return (div.textContent || '').trim();
 }
 
+// Tidy up run-together text: restore the space after sentence punctuation
+// (e.g. "350 degrees.Wrap" -> "350 degrees. Wrap") without touching decimals.
+function tidySpacing(s) {
+  return String(s || '')
+    .replace(/\s+/g, ' ')
+    .replace(/([.!?])([A-Z])/g, '$1 $2')
+    .replace(/([,;:])(\S)/g, (m, p, c) => /\d/.test(c) ? m : p + ' ' + c)
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function stripStepPrefix(s) {
+  return String(s).replace(/^\s*(?:step\s*)?\d+\s*[.):\-]\s*/i, '').trim();
+}
+
+// Turn an instructions HTML/text blob into discrete steps. Prefers the
+// document's own structure (list items, then paragraphs) so steps aren't
+// merged; falls back to splitting on line breaks, then sentences.
+function htmlToSteps(html) {
+  if (!html) return [];
+  const div = document.createElement('div');
+  div.innerHTML = String(html);
+  let nodes = div.querySelectorAll('li');
+  if (!nodes.length) nodes = div.querySelectorAll('p');
+  let steps;
+  if (nodes.length) {
+    steps = Array.from(nodes).map(n => tidySpacing(n.textContent || ''));
+  } else {
+    const withBreaks = String(html)
+      .replace(/<\s*br\s*\/?>/gi, '\n')
+      .replace(/<\/(p|div|li|ol|ul|h\d)>/gi, '\n');
+    const tmp = document.createElement('div');
+    tmp.innerHTML = withBreaks;
+    const text = tidySpacing(tmp.textContent || '');
+    steps = text.split(/\n+/).map(s => s.trim());
+    if (steps.length <= 1) {
+      const parts = text.match(/[^.!?]+[.!?]+(?:\s|$)/g);
+      if (parts && parts.length > 1) steps = parts.map(s => s.trim());
+    }
+  }
+  return steps.map(stripStepPrefix).filter(Boolean);
+}
+
+// Build the step list from a Spoonacular recipe. Uses whichever source is more
+// granular: the pre-analyzed steps or the raw instructions HTML (the latter
+// usually preserves the original site's step count, like Foodista's).
+function spoonSteps(r) {
+  const fromAnalyzed = [];
+  if (r.analyzedInstructions && r.analyzedInstructions.length) {
+    r.analyzedInstructions.forEach(b => (b.steps || []).forEach(s => {
+      const t = tidySpacing(s.step || '');
+      if (t) fromAnalyzed.push(t);
+    }));
+  }
+  const fromHtml = r.instructions ? htmlToSteps(r.instructions) : [];
+  if (!fromHtml.length && !fromAnalyzed.length) return [];
+  return fromHtml.length > fromAnalyzed.length ? fromHtml : fromAnalyzed;
+}
+
+// Spoonacular summaries are mostly auto-generated stats and marketing
+// ("129 people liked this", price/score/calories, similar-recipe links).
+// Keep only the sentences that actually describe the dish.
+function cleanSummary(html) {
+  const text = stripHtml(html);
+  if (!text) return '';
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  const fluff = /\b(\d+\s*people|cents?|dollars?|per serving|%|percent|calorie|protein|fat\b|carb|grams?|score|spoonacular|similar recipe|take a look|users?|found this recipe|liked this|liked by|foodies|out of \d|works out to|daily (requirement|need|value)|head over to|if you (like|are|want)|tries to|(makes|serves) \d|this recipe (makes|serves)|brought to you|costs?|\$\d|rating|nutrition|preparation to the plate|takes (around|about|roughly)|ready in|\d+ minutes|is a (great|good|nice) (option|choice)|beginning to end)/i;
+  const kept = sentences.map(s => s.trim()).filter(s => s && !fluff.test(s));
+  const out = kept.join(' ').replace(/\s+/g, ' ').trim();
+  return out || (sentences[0] || '').trim();
+}
+
 function discoverCardHtml(r) {
   // r has at least: id, title, image, sourceUrl, sourceName, readyInMinutes
   const img = r.image ? `<div class="discover-card-image" style="background-image:url('${escapeHtml(r.image)}')"></div>` 
@@ -2773,7 +2845,7 @@ function decimalToFraction(decimal) {
 function convertSpoonacularRecipe(r) {
   return {
     title: r.title || 'Untitled Recipe',
-    description: stripHtml(r.summary || ''),
+    description: cleanSummary(r.summary || ''),
     image: r.image || '',
     category: (r.dishTypes && r.dishTypes[0]) ? r.dishTypes[0].charAt(0).toUpperCase() + r.dishTypes[0].slice(1) : 'Other',
     tags: ((r.diets || []).concat(r.cuisines || [])).slice(0, 6),
@@ -2785,13 +2857,7 @@ function convertSpoonacularRecipe(r) {
       unit: i.unit || '',
       name: i.originalName || i.name || ''
     })),
-    instructions: (() => {
-      if (r.analyzedInstructions && r.analyzedInstructions[0] && r.analyzedInstructions[0].steps) {
-        return r.analyzedInstructions[0].steps.map(s => s.step).filter(Boolean);
-      }
-      if (r.instructions) return stripHtml(r.instructions).split(/\n+/).map(s => s.trim()).filter(Boolean);
-      return [];
-    })(),
+    instructions: spoonSteps(r),
     notes: '',
     sourceUrl: r.sourceUrl || '',
     favorite: false,
