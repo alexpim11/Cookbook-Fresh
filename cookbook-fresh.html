@@ -2693,15 +2693,20 @@ function htmlToSteps(html) {
   if (nodes.length >= 2) {
     return nodes.map(n => tidySpacing(n.textContent || '')).map(stripStepPrefix).filter(Boolean);
   }
+  // No list/paragraph tags: work from the raw text, preserving line breaks.
+  // Spoonacular often stores steps as plain text separated by newlines, and the
+  // author's grouping lives in those breaks -- so split on them BEFORE collapsing
+  // whitespace (tidySpacing would otherwise turn newlines into spaces, merging
+  // every step into one blob).
   const withBreaks = String(html)
     .replace(/<\s*br\s*\/?>/gi, '\n')
     .replace(/<\/(p|div|li|ol|ul|h\d)>/gi, '\n');
   const tmp = document.createElement('div');
   tmp.innerHTML = withBreaks;
-  const text = tidySpacing(tmp.textContent || '');
-  let steps = splitNumbered(text);
-  if (steps.length < 2) steps = text.split(/\n+/).map(s => s.trim());
-  return steps.map(stripStepPrefix).filter(Boolean);
+  const raw = tmp.textContent || '';
+  let steps = raw.split(/\r?\n+/).map(s => s.trim()).filter(Boolean);
+  if (steps.length < 2) steps = splitNumbered(raw.replace(/\s+/g, ' ').trim());
+  return steps.map(s => stripStepPrefix(tidySpacing(s))).filter(Boolean);
 }
 
 // Build the step list from a Spoonacular recipe. Prefer the source site's own
