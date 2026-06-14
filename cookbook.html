@@ -2671,38 +2671,46 @@ function stripStepPrefix(s) {
   return String(s).replace(/^\s*(?:step\s*)?\d+\s*[.):\-]\s*/i, '').trim();
 }
 
-// Turn an instructions HTML/text blob into discrete steps. Prefers the
-// document's own structure (list items, then paragraphs) so steps aren't
-// merged; falls back to splitting on line breaks, then sentences.
+// Split a plain-text blob on explicit numbered markers ("1. ... 2. ..."). Only
+// splits when the text actually looks like a numbered list, so it never invents
+// fragments from ordinary sentences.
+function splitNumbered(text) {
+  if (!/(^|\s)1[.)]\s/.test(text) || !/(^|\s)2[.)]\s/.test(text)) return [text];
+  const parts = text.split(/\s+(?=\d{1,2}[.)]\s)/).map(s => s.trim()).filter(Boolean);
+  return parts.length > 1 ? parts : [text];
+}
+
+// Turn an instructions HTML/text blob into discrete steps, preserving the source
+// site's own grouping. Uses list items / paragraphs first, then explicit
+// numbering, then line breaks. It deliberately does NOT split on sentences,
+// which previously shredded steps into nonsensical fragments.
 function htmlToSteps(html) {
   if (!html) return [];
   const div = document.createElement('div');
   div.innerHTML = String(html);
-  let nodes = div.querySelectorAll('li');
-  if (!nodes.length) nodes = div.querySelectorAll('p');
-  let steps;
-  if (nodes.length) {
-    steps = Array.from(nodes).map(n => tidySpacing(n.textContent || ''));
-  } else {
-    const withBreaks = String(html)
-      .replace(/<\s*br\s*\/?>/gi, '\n')
-      .replace(/<\/(p|div|li|ol|ul|h\d)>/gi, '\n');
-    const tmp = document.createElement('div');
-    tmp.innerHTML = withBreaks;
-    const text = tidySpacing(tmp.textContent || '');
-    steps = text.split(/\n+/).map(s => s.trim());
-    if (steps.length <= 1) {
-      const parts = text.match(/[^.!?]+[.!?]+(?:\s|$)/g);
-      if (parts && parts.length > 1) steps = parts.map(s => s.trim());
-    }
+  let nodes = Array.from(div.querySelectorAll('li'));
+  if (nodes.length < 2) nodes = Array.from(div.querySelectorAll('p'));
+  if (nodes.length >= 2) {
+    return nodes.map(n => tidySpacing(n.textContent || '')).map(stripStepPrefix).filter(Boolean);
   }
+  const withBreaks = String(html)
+    .replace(/<\s*br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li|ol|ul|h\d)>/gi, '\n');
+  const tmp = document.createElement('div');
+  tmp.innerHTML = withBreaks;
+  const text = tidySpacing(tmp.textContent || '');
+  let steps = splitNumbered(text);
+  if (steps.length < 2) steps = text.split(/\n+/).map(s => s.trim());
   return steps.map(stripStepPrefix).filter(Boolean);
 }
 
-// Build the step list from a Spoonacular recipe. Uses whichever source is more
-// granular: the pre-analyzed steps or the raw instructions HTML (the latter
-// usually preserves the original site's step count, like Foodista's).
+// Build the step list from a Spoonacular recipe. Prefer the source site's own
+// structure (Foodista's grouping survives in r.instructions). Only fall back to
+// Spoonacular's analyzed steps -- which often over-segment into many tiny pieces
+// -- when the source instructions don't yield multiple discrete steps.
 function spoonSteps(r) {
+  const fromHtml = r.instructions ? htmlToSteps(r.instructions) : [];
+  if (fromHtml.length >= 2) return fromHtml;
   const fromAnalyzed = [];
   if (r.analyzedInstructions && r.analyzedInstructions.length) {
     r.analyzedInstructions.forEach(b => (b.steps || []).forEach(s => {
@@ -2710,9 +2718,8 @@ function spoonSteps(r) {
       if (t) fromAnalyzed.push(t);
     }));
   }
-  const fromHtml = r.instructions ? htmlToSteps(r.instructions) : [];
-  if (!fromHtml.length && !fromAnalyzed.length) return [];
-  return fromHtml.length > fromAnalyzed.length ? fromHtml : fromAnalyzed;
+  if (fromAnalyzed.length) return fromAnalyzed;
+  return fromHtml;
 }
 
 // Spoonacular summaries are mostly auto-generated stats and marketing
