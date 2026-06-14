@@ -2882,4 +2882,93 @@ async function previewSpoonacularRecipe(spoonId) {
   document.getElementById('detailContent').innerHTML = '<div class="notice" style="margin-top:16px;"><span class="spinner"></span> Loading recipe...</div>';
   showView('detail');
   try {
-    const recipe = await fetchSpoonacularRecipe(spoonI
+    const recipe = await fetchSpoonacularRecipe(spoonId);
+    _previewRecipe = recipe;
+    renderRecipeDetail(recipe, 'preview');
+  } catch (e) {
+    document.getElementById('detailContent').innerHTML = '<div class="error" style="margin-top:16px;">Couldn\'t load that recipe: ' + escapeHtml(e.message || String(e)) + '</div>';
+  }
+}
+
+function savePreviewRecipe() {
+  if (!_previewRecipe) return;
+  const recipe = Object.assign({}, _previewRecipe, { id: uid(), createdAt: Date.now() });
+  state.recipes.push(recipe);
+  save();
+  _previewRecipe = null;
+  // Re-render the same detail in saved mode so user sees Edit/Delete buttons
+  // and gets visual confirmation. Back link stays pointing to home.
+  renderRecipeDetail(recipe, 'saved');
+  setTimeout(() => alert(`Saved "${recipe.title}" to your recipe book!`), 50);
+}
+
+async function saveSpoonacularRecipe(spoonId) {
+  const key = spoonKey();
+  if (!key) { alert("Recipe discovery isn't set up yet."); return; }
+  try {
+    const recipe = await fetchSpoonacularRecipe(spoonId);
+    recipe.id = uid();
+    recipe.createdAt = Date.now();
+    state.recipes.push(recipe);
+    save();
+    alert(`Saved "${recipe.title}" to your recipe book!`);
+  } catch (e) {
+    alert("Couldn't save: " + (e.message || e));
+  }
+}
+
+/* ---------- Init ---------- */
+load();
+state.currentWeekStart = startOfWeek(new Date());
+renderRecipes();
+setupDropZone();
+
+// Set default filter chip
+document.querySelector('.filter-chip[data-filter="all"]').classList.add('active');
+
+// Home is the default landing view — kick off the daily pick fetch
+loadDailyPick();
+
+// Kick off Firebase sync if configured. The Firebase SDK scripts use defer
+// so they may load slightly after this; poll briefly for it.
+(function bootFirebase() {
+  if (typeof firebase !== 'undefined') {
+    initFirebase();
+  } else {
+    setTimeout(bootFirebase, 100);
+  }
+})();
+
+// PWA: register service worker + auto-reload when a new version takes over.
+// This means installed PWAs pick up updates automatically on next launch — no
+// force-quit dance needed once this code is the installed version.
+if ('serviceWorker' in navigator) {
+  let _reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (_reloading) return;
+    _reloading = true;
+    window.location.reload();
+  });
+
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').then(reg => {
+      // Force a check for a new sw.js on every page load (bypasses some HTTP caches).
+      reg.update().catch(() => {});
+      // When a new SW finishes installing while there's still an old one in control,
+      // skipWaiting() in sw.js makes it activate immediately and controllerchange fires.
+      reg.addEventListener('updatefound', () => {
+        const nw = reg.installing;
+        if (!nw) return;
+        nw.addEventListener('statechange', () => {
+          // intentionally a no-op — controllerchange above handles the reload
+        });
+      });
+    }).catch(() => {
+      // file:// or unsupported — silently OK.
+    });
+  });
+}
+</script>
+
+</body>
+</html>
