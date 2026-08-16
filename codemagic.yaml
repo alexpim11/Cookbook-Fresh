@@ -8,6 +8,8 @@ workflows:
       node: 20
       xcode: latest
       cocoapods: default
+      groups:
+        - ai_credentials         # OPENAI_API_KEY (optional; set in Codemagic UI)
     cache:
       cache_paths:
         - $HOME/Library/Caches/CocoaPods
@@ -16,6 +18,25 @@ workflows:
       - name: Install npm dependencies
         script: |
           npm install
+      - name: Inject OpenAI key for the meal planner
+        script: |
+          # The key comes from an encrypted Codemagic variable, so it never
+          # touches the repo. This runs before `cap sync` so the generated file
+          # gets copied into the app bundle. With no variable set the app still
+          # builds and simply plans from Spoonacular alone.
+          if [ -n "$OPENAI_API_KEY" ]; then
+            MODEL="${OPENAI_MODEL:-gpt-4o-mini}"
+            cat > www/ai-config.js <<EOF
+          window.AI_CONFIG = {
+            apiKey: "$OPENAI_API_KEY",
+            model: "$MODEL",
+            baseUrl: "https://api.openai.com/v1"
+          };
+          EOF
+            echo "OpenAI key injected (model: $MODEL)."
+          else
+            echo "No OPENAI_API_KEY set - building without AI meal-plan assistance."
+          fi
       - name: Add iOS platform if missing
         script: |
           if [ ! -d "ios" ]; then
@@ -60,6 +81,7 @@ workflows:
       cocoapods: default
       groups:
         - appstore_credentials   # contains CERTIFICATE_PRIVATE_KEY (set in Codemagic UI)
+        - ai_credentials         # OPENAI_API_KEY (optional; set in Codemagic UI)
       vars:
         APP_STORE_APP_ID: 6779255093
         BUNDLE_ID: com.alex.mycookbook
@@ -68,6 +90,25 @@ workflows:
     scripts:
       - name: Install npm dependencies
         script: npm install
+      - name: Inject OpenAI key for the meal planner
+        script: |
+          # The key comes from an encrypted Codemagic variable, so it never
+          # touches the repo. This runs before `cap sync` so the generated file
+          # gets copied into the app bundle. With no variable set the app still
+          # builds and simply plans from Spoonacular alone.
+          if [ -n "$OPENAI_API_KEY" ]; then
+            MODEL="${OPENAI_MODEL:-gpt-4o-mini}"
+            cat > www/ai-config.js <<EOF
+          window.AI_CONFIG = {
+            apiKey: "$OPENAI_API_KEY",
+            model: "$MODEL",
+            baseUrl: "https://api.openai.com/v1"
+          };
+          EOF
+            echo "OpenAI key injected (model: $MODEL)."
+          else
+            echo "No OPENAI_API_KEY set - building without AI meal-plan assistance."
+          fi
       - name: Add iOS platform if missing
         script: |
           if [ ! -d "ios" ]; then

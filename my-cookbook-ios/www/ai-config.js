@@ -1,26 +1,41 @@
 // ai-config.js
 //
-// Paste your OpenAI API key here, then save and push to GitHub.
-// See AI-SETUP.md for how to get the key (about 3 minutes).
+// ⚠️  LEAVE THE PLACEHOLDER BELOW ALONE. Do not paste your real key here.
 //
-// This key sits in the app's front-end code, which means anyone who can open
-// the app can read it. That's fine for a personal / household app, but you
-// should:
-//   - set a monthly spend limit on the key at platform.openai.com/limits
-//   - use a key created just for this app, so you can revoke it on its own
+// This file is committed to a public GitHub repo. A real OpenAI key put in
+// here would be found by automated scanners and revoked by OpenAI within
+// minutes — and would be readable by anyone in the meantime.
 //
-// If you leave the placeholder below as-is, the Meal Plan page simply shows a
-// "set this up to generate plans" message — the rest of the app still works.
+// Where the real key actually lives:
+//
+//   iOS app  — an encrypted Codemagic environment variable (OPENAI_API_KEY,
+//              in the "ai_credentials" group). The build overwrites this file
+//              with the real one before packaging. See AI-SETUP.md.
+//
+//   Web app  — nowhere. GitHub Pages serves straight from the repo, so there
+//              is no safe place to put it. The web version therefore runs
+//              without AI, which is fine: the meal planner still works from
+//              Spoonacular alone. It reads "low fat", "vegetarian", "quick"
+//              and so on out of your notes and plans the week from those.
+//
+// If you later want AI on the web version too, the answer is a proxy that
+// holds the key server-side (a free Cloudflare Worker is the usual choice) —
+// see the "About the key" section of AI-SETUP.md.
+//
+// To try a real key locally without risking a commit, run:
+//     git update-index --skip-worktree ai-config.js
+// ...then edit freely. Undo it with --no-skip-worktree.
 
 window.AI_CONFIG = {
   apiKey: "PASTE_YOUR_OPENAI_API_KEY_HERE",
 
-  // Which model writes the plan.
-  //   gpt-4o-mini  — cheapest, roughly a fifth of a cent per week generated. Good default.
-  //   gpt-4o       — noticeably better recipes and more careful about your brief.
-  //   gpt-4.1      — also fine if your account has it.
+  // Which model reads your brief and arranges the week. It never writes
+  // recipes — those always come from Spoonacular.
+  //   gpt-4o-mini  — the default. Well under a tenth of a cent per plan.
+  //   gpt-4o       — reads a complicated brief more carefully. About a cent.
+  // Override for the iOS build with an OPENAI_MODEL variable in Codemagic.
   model: "gpt-4o-mini",
 
-  // Leave this alone unless you're pointing at a compatible proxy.
+  // Leave this alone unless you're pointing at a proxy.
   baseUrl: "https://api.openai.com/v1"
 };

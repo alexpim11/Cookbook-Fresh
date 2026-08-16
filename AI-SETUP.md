@@ -46,6 +46,24 @@ With a key, it does two jobs, and **neither of them is writing recipes**:
 It can only pick from the recipes Spoonacular returned. If it tries to invent
 one, the app throws it out.
 
+### Where the key lives
+
+**Not in `ai-config.js`.** That file is committed to a public repo, and OpenAI's
+scanners revoke keys they find in public repositories — usually within minutes.
+Leave the placeholder in it alone.
+
+Instead:
+
+| | Gets AI? | Key stored where |
+|---|---|---|
+| **iOS app** (Codemagic → TestFlight) | Yes | Encrypted Codemagic variable, written into the bundle at build time |
+| **Web app** (GitHub Pages) | No | Nowhere — Pages serves straight from the repo, so there's no safe place |
+
+The web version is not broken by this. It plans from Spoonacular alone, reading
+"low fat", "vegetarian", "quick", cuisine names and your avoid list out of the
+form and your notes. You just don't get the careful reading of a long free-text
+brief there.
+
 ### Getting a key
 
 1. Go to **https://platform.openai.com/api-keys** and sign in.
@@ -53,43 +71,68 @@ one, the app throws it out.
    **https://platform.openai.com/settings/organization/billing** — a couple of
    dollars lasts a very long time here. A ChatGPT Plus subscription does *not*
    cover API usage; they're billed separately.
-3. **Create new secret key**, name it `Stir Crazy`, and copy it. It starts with
-   `sk-` and you only get to see it once.
-4. Paste it into `ai-config.js`:
+3. Set a monthly hard cap at
+   **https://platform.openai.com/settings/organization/limits**. $5 means the
+   worst case is $5.
+4. **Create new secret key**, name it `Stir Crazy iOS`, and copy it. It starts
+   with `sk-` and you only get to see it once.
 
-```js
-window.AI_CONFIG = {
-  apiKey: "sk-your-actual-key-here",
-  model: "gpt-4o-mini",
-  baseUrl: "https://api.openai.com/v1"
-};
-```
+### Putting it into Codemagic
 
-Then push and wait a minute or two for GitHub Pages.
+1. Open your app in Codemagic → **Settings** → **Environment variables**.
+2. Add:
+   - **Variable name:** `OPENAI_API_KEY`
+   - **Value:** your `sk-...` key
+   - **Group:** `ai_credentials`  ← type this exactly; `codemagic.yaml` expects it
+   - **Secure:** ticked (this is what keeps it out of build logs)
+3. Optionally add `OPENAI_MODEL` to the same group with the value `gpt-4o` if
+   you want the better model on iOS. Default is `gpt-4o-mini`.
+4. Click **Add**, then run a build.
+
+`codemagic.yaml` has a step called *"Inject OpenAI key for the meal planner"*
+that runs before `cap sync`. It writes the real `ai-config.js` into `www/` so it
+gets copied into the app bundle. If the variable isn't set, the step says so and
+the build carries on without it — nothing breaks.
+
+Nothing needs to change on your machine, and nothing needs to be gitignored:
+the real key never exists locally, so it can't be committed by accident.
 
 ### Cost
 
 Both calls are small — the model reads a list of recipe titles and nutrition
 figures, it doesn't write any recipe text. A generated week is well under a
-tenth of a cent on `gpt-4o-mini`, and about a cent on `gpt-4o`. If plans feel
-like they're not reading your brief carefully enough, switching `model` to
-`"gpt-4o"` is the single biggest lever.
+tenth of a cent on `gpt-4o-mini`, and about a cent on `gpt-4o`.
 
-### About the key being in the app
+### What this does and doesn't protect
 
-`ai-config.js` is part of the front-end, so anyone who can load the app can read
-the key — and because the repo is public, automated scanners will find it too.
-**OpenAI revokes keys it finds in public repositories, usually within minutes.**
+**Does:** keeps the key out of GitHub, so it won't be scanned and auto-revoked,
+and won't be visible to anyone browsing the repo.
 
-So before you paste a real key in, deal with that. The options, briefly:
+**Doesn't:** make the key secret from someone holding the app. An `.ipa` is a
+zip file, and the key sits in plain-text JavaScript inside it. Anyone
+determined enough to unpack a TestFlight build can read it. For a household app
+that's a fair trade — the spend cap is your real protection.
 
-- **A Cloudflare Worker proxy** (free) holds the key server-side; `ai-config.js`
-  then only contains your Worker's URL, which is harmless.
-- **Make the repo private** — but GitHub Pages then needs GitHub Pro.
-- **A Firebase Cloud Function** proxy, which needs the Blaze plan.
+If you ever want it genuinely secret, and AI working on the web version too,
+the answer is a proxy holding the key server-side: a free **Cloudflare Worker**
+is the usual choice, and `ai-config.js` would then contain only the Worker's
+URL, which is harmless to commit.
 
-Either way, set a monthly hard cap at
-https://platform.openai.com/settings/organization/limits.
+### One iOS gotcha to watch on the first build
+
+The app calls OpenAI from inside a WKWebView. If the web version works but the
+iPhone app says *"Couldn't reach OpenAI from inside the app"*, the request is
+being blocked in the WebView rather than failing on the network. The fix is to
+route requests through native code by adding this to
+`my-cookbook-ios/capacitor.config.json`:
+
+```json
+"plugins": { "CapacitorHttp": { "enabled": true } }
+```
+
+Only do this if you actually hit the problem — it changes how *every* network
+request in the app is made, including Firebase sync and the recipe importer, so
+it's worth re-testing those afterwards.
 
 ---
 
