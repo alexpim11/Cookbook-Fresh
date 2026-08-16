@@ -2281,8 +2281,10 @@ function rebuildShoppingList() {
     for (const ing of (ev.recipe.ingredients || [])) {
       if (!ing || !ing.name) continue;
       const key = ing.name.trim().toLowerCase();
-      if (!map.has(key)) map.set(key, { name: ing.name.trim(), units: new Map(), loose: [] });
+      if (!map.has(key)) map.set(key, { name: ing.name.trim(), units: new Map(), loose: [], aisle: '' });
       const bucket = map.get(key);
+      // The first recipe that knows the aisle wins; hand-typed recipes won't.
+      if (!bucket.aisle && ing.aisle) bucket.aisle = ing.aisle;
       const qty = parseAmount(ing.amount);
       if (qty == null) {
         // "to taste", "a handful" — nothing to add up, so keep the words.
@@ -2299,11 +2301,22 @@ function rebuildShoppingList() {
     const parts = [...v.units.entries()]
       .map(([u, n]) => [formatQty(n, u), u].filter(Boolean).join(' ').trim())
       .concat(v.loose);
-    return {
+    const out = {
       item: parts.length ? `${parts.join(' + ')} ${v.name}` : v.name,
       checked: false,
     };
+    if (v.aisle) out.category = v.aisle;
+    return out;
   });
+  // Group the shop the way you'd walk it, not the order recipes happened to
+  // mention things.
+  const AISLE_ORDER = ['Produce', 'Meat & Fish', 'Dairy & Eggs', 'Bakery',
+    'Pantry', 'Herbs & Spices', 'Frozen', 'Drinks', 'Other'];
+  const rank = c => {
+    const i = AISLE_ORDER.indexOf(c || 'Other');
+    return i === -1 ? AISLE_ORDER.length : i;
+  };
+  state.shopping.sort((a, b) => rank(a.category) - rank(b.category));
 
   if (state.shopping.length === 0) {
     alert('You haven\'t planned any meals this week yet. Head to Meal Plan and add some first.');
@@ -3200,8 +3213,31 @@ function decimalToFraction(decimal) {
   return num.toFixed(2);
 }
 
+/* Spoonacular's aisle names are granular and a bit shouty ("Milk, Eggs, Other
+   Dairy", "Oil, Vinegar, Salad Dressing"), and an ingredient can list several
+   separated by semicolons. Fold them into the handful of headings you'd
+   actually walk past in a shop. */
+const AISLE_MAP = [
+  [/produce|vegetab|fruit/i, 'Produce'],
+  [/meat|seafood|poultry/i, 'Meat & Fish'],
+  [/cheese|dairy|egg|refrigerat/i, 'Dairy & Eggs'],
+  [/bakery|bread/i, 'Bakery'],
+  [/frozen/i, 'Frozen'],
+  [/spice|seasoning/i, 'Herbs & Spices'],
+  [/beverage|drink/i, 'Drinks'],
+  [/pasta|rice|canned|jarred|baking|oil|vinegar|condiment|sauce|nuts|dried fruit|grain|cereal|legume|health food|ethnic|gourmet|snack|sweet/i, 'Pantry'],
+];
+function tidyAisle(raw) {
+  if (!raw) return '';
+  const first = String(raw).split(';')[0].trim();
+  for (const [re, name] of AISLE_MAP) if (re.test(first)) return name;
+  return 'Other';
+}
+
 function convertSpoonacularRecipe(r) {
   return {
+    // Kept so we can tell we already have this one and don't save it twice.
+    spoonId: r.id || null,
     title: r.title || 'Untitled Recipe',
     description: cleanSummary(r.summary || ''),
     image: r.image || '',
@@ -3213,7 +3249,10 @@ function convertSpoonacularRecipe(r) {
     ingredients: (r.extendedIngredients || []).map(i => ({
       amount: decimalToFraction(i.amount),
       unit: i.unit || '',
-      name: i.originalName || i.name || ''
+      name: i.originalName || i.name || '',
+      // Spoonacular tells us which part of the shop each ingredient lives in.
+      // Carried through so the shopping list can group itself.
+      aisle: tidyAisle(i.aisle),
     })),
     instructions: spoonSteps(r),
     notes: '',
@@ -3305,21 +3344,29 @@ async function saveSpoonacularRecipe(spoonId) {
 }
 
 /* ============================================================
-   AI meal planner
-   Asks OpenAI for a whole week — recipes, the plan itself, and a
-   consolidated grocery list — then lets you look it over before it
-   touches anything.
+   Meal plan builder
+
+   Recipes always come from Spoonacular — the same source the Home tab
+   uses — so everything planned is a real, tested recipe with a source
+   link. Nothing here invents food.
+
+   OpenAI is optional and does two jobs, neither of which is writing
+   recipes:
+     1. Turning a free-text brief into Spoonacular search filters.
+     2. Choosing which of the recipes Spoonacular returned goes where,
+        and how leftovers chain across the week.
+   Without an OpenAI key both jobs fall back to local logic, so the
+   planner still works — just less clever about free text.
    ============================================================ */
 
 const AI_PLANNING_PHRASES = [
+  'Reading your notes back',
+  'Working out what to search for',
+  'Going through the recipe database',
+  'Checking the nutrition numbers',
   'Sketching out the week',
-  'Balancing the plates',
-  'Checking what plays nicely together',
   'Working out what to batch cook',
   'Doing the sums on portions',
-  'Writing up the recipes',
-  'Making the shopping list behave',
-  'Reading your notes back',
   'Second-guessing Wednesday',
 ];
 
@@ -3330,6 +3377,13 @@ const AI_CHIPS = [
 ];
 
 const AI_SLOTS = ['breakfast', 'lunch', 'dinner'];
+
+// Spoonacular's meal-type values for each of our slots.
+const SLOT_TYPES = {
+  breakfast: 'breakfast',
+  lunch: 'main course,salad,soup',
+  dinner: 'main course',
+};
 
 function aiCfg() { return window.AI_CONFIG || {}; }
 function aiKey() {
@@ -3346,14 +3400,27 @@ function toggleAIPlanner() {
 }
 
 function renderAIPlannerForm() {
-  // Setup notice when there's no key yet — same spirit as the Spoonacular fallback.
+  // Spoonacular is the hard requirement; OpenAI is the optional upgrade.
   const notice = document.getElementById('aiSetupNotice');
-  notice.innerHTML = isAIConfigured() ? '' : `
-    <div class="notice" style="margin-top:16px; margin-bottom:0;">
-      <strong>One-time setup needed.</strong> Paste an OpenAI API key into
-      <code>ai-config.js</code> and this will start working. See AI-SETUP.md for
-      the two-minute version.
-    </div>`;
+  if (!spoonKey()) {
+    notice.innerHTML = `
+      <div class="error" style="margin-top:16px; margin-bottom:0;">
+        <strong>Needs a Spoonacular key.</strong> Meal plans are built from the
+        Spoonacular recipe database, same as the Home tab. Add your key to
+        <code>spoonacular-config.js</code> — see SPOONACULAR-SETUP.md.
+      </div>`;
+  } else if (!isAIConfigured()) {
+    notice.innerHTML = `
+      <div class="notice" style="margin-top:16px; margin-bottom:0;">
+        <strong>Working without AI.</strong> Plans are built straight from
+        Spoonacular using the settings below, and common phrases in your notes
+        ("low fat", "vegetarian", "quick") are picked up too. Add an OpenAI key
+        to <code>ai-config.js</code> and it'll understand the whole brief
+        properly — see AI-SETUP.md.
+      </div>`;
+  } else {
+    notice.innerHTML = '';
+  }
 
   document.getElementById('aiChips').innerHTML = AI_CHIPS
     .map(c => `<button type="button" class="ai-chip" onclick="addAIChip('${escapeHtml(c)}')">+ ${escapeHtml(c)}</button>`)
@@ -3369,7 +3436,7 @@ function renderAIPlannerForm() {
     document.getElementById('aiSlot' + s[0].toUpperCase() + s.slice(1)).checked =
       (p.slots || ['dinner']).includes(s);
   }
-  document.getElementById('aiGenerateBtn').disabled = !isAIConfigured();
+  document.getElementById('aiGenerateBtn').disabled = !spoonKey();
 }
 
 function addAIChip(text) {
@@ -3403,90 +3470,6 @@ function resetAIPrefs() {
   document.getElementById('aiStatus').innerHTML = '';
 }
 
-/* ---------- Prompt ---------- */
-
-// The shape we insist the model replies in. Strict JSON schema means we get
-// back something we can hand straight to the app without defensive parsing.
-const AI_PLAN_SCHEMA = {
-  name: 'weekly_meal_plan',
-  strict: true,
-  schema: {
-    type: 'object',
-    additionalProperties: false,
-    required: ['summary', 'recipes', 'plan', 'groceries'],
-    properties: {
-      summary: {
-        type: 'string',
-        description: 'Two or three sentences explaining how this week hangs together and how the leftovers work.'
-      },
-      recipes: {
-        type: 'array',
-        description: 'Every distinct recipe cooked this week, written in full.',
-        items: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['ref', 'title', 'description', 'category', 'tags', 'prepTime', 'cookTime', 'servings', 'ingredients', 'instructions', 'notes'],
-          properties: {
-            ref: { type: 'string', description: 'Short unique id used to reference this recipe from the plan, e.g. "r1".' },
-            title: { type: 'string' },
-            description: { type: 'string', description: 'One sentence.' },
-            category: { type: 'string', enum: ['Breakfast', 'Lunch', 'Dinner', 'Dessert', 'Snack', 'Drink', 'Side', 'Other'] },
-            tags: { type: 'array', items: { type: 'string' } },
-            prepTime: { type: 'integer', description: 'Minutes.' },
-            cookTime: { type: 'integer', description: 'Minutes.' },
-            servings: { type: 'integer', description: 'Total portions this recipe as written produces, including any intended for leftovers.' },
-            ingredients: {
-              type: 'array',
-              items: {
-                type: 'object',
-                additionalProperties: false,
-                required: ['amount', 'unit', 'name'],
-                properties: {
-                  amount: { type: 'string', description: 'Just the number, e.g. "2" or "1 1/2". Empty string if not applicable.' },
-                  unit: { type: 'string', description: 'e.g. "g", "tbsp", "cup". Empty string for whole items.' },
-                  name: { type: 'string' }
-                }
-              }
-            },
-            instructions: { type: 'array', items: { type: 'string' } },
-            notes: { type: 'string', description: 'Storage and reheating advice when this recipe feeds a leftover night.' }
-          }
-        }
-      },
-      plan: {
-        type: 'array',
-        description: 'One entry per filled meal slot.',
-        items: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['date', 'slot', 'ref', 'servings', 'leftover', 'note'],
-          properties: {
-            date: { type: 'string', description: 'YYYY-MM-DD, must be one of the dates given.' },
-            slot: { type: 'string', enum: ['breakfast', 'lunch', 'dinner'] },
-            ref: { type: 'string', description: 'Matches a recipe ref.' },
-            servings: { type: 'integer', description: 'Portions eaten at this sitting.' },
-            leftover: { type: 'boolean', description: 'True when this is eating something cooked on an earlier day.' },
-            note: { type: 'string', description: 'Short aside, e.g. "reheat from Sunday". Empty string if there is nothing to say.' }
-          }
-        }
-      },
-      groceries: {
-        type: 'array',
-        description: 'Consolidated shopping for the whole week. Each ingredient appears once, with quantities already added up across recipes, counted only for meals actually cooked.',
-        items: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['item', 'category'],
-          properties: {
-            item: { type: 'string', description: 'Quantity and name together, e.g. "1.2 kg chicken thighs".' },
-            category: { type: 'string', enum: ['Produce', 'Meat & Fish', 'Dairy & Eggs', 'Bakery', 'Pantry', 'Frozen', 'Herbs & Spices', 'Other'] }
-          }
-        }
-      }
-    }
-  }
-};
-
 function aiWeekDays() {
   const start = new Date(state.currentWeekStart || startOfWeek(new Date()));
   const names = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -3498,70 +3481,402 @@ function aiWeekDays() {
   return out;
 }
 
-function buildAIPlanPrompt(prefs, days) {
-  const leftoverGuidance = {
-    none: 'Cook something fresh for every single meal. Do not repeat a recipe and do not plan any leftovers.',
-    some: 'Use leftovers sparingly — one or two meals across the week should be a second helping of something cooked earlier. Scale those recipes up so there is genuinely enough.',
-    lots: 'Lean on batch cooking. Several recipes should be scaled up deliberately so they cover two, or occasionally three, meals. Spread the leftover meals a day or two after the cook so nothing sits too long.',
-  }[prefs.leftovers] || '';
+/* ============================================================
+   Stage 1 — work out what to search Spoonacular for
+   ============================================================ */
 
-  const existing = state.recipes.map(r => r.title).slice(0, 60);
+// Only these ever reach the Spoonacular URL. Anything else the model
+// suggests is dropped, so a bad suggestion can't build a strange request.
+const SPOON_PARAMS = [
+  'query', 'diet', 'intolerances', 'cuisine', 'excludeCuisine', 'type',
+  'includeIngredients', 'excludeIngredients', 'maxReadyTime',
+  'minFiber', 'maxFat', 'minProtein', 'maxProtein', 'minCalories', 'maxCalories',
+  'minCarbs', 'maxCarbs', 'maxSodium', 'maxSugar', 'minServings',
+];
 
-  return [
-    `Plan meals for the week of ${days[0].date} to ${days[6].date}.`,
-    '',
-    'Days available:',
-    ...days.map(d => `  ${d.name} — ${d.date}`),
-    '',
-    `Fill these meal slots on every day: ${prefs.slots.join(', ')}. Leave all other slots empty.`,
-    `Cooking for ${prefs.people} ${prefs.people === 1 ? 'person' : 'people'}.`,
-    '',
-    'What they asked for, in their own words:',
-    prefs.brief ? `  "${prefs.brief}"` : '  (nothing specific — use your judgement and keep it varied and balanced)',
-    '',
-    `Leftovers: ${leftoverGuidance}`,
-    prefs.maxTime ? `No single meal should take more than ${prefs.maxTime} minutes from start to plate, unless they specifically asked for something slower.` : '',
-    prefs.avoid ? `Must avoid entirely: ${prefs.avoid}. Treat this as a hard rule — check every ingredient of every recipe against it.` : '',
-    existing.length ? `\nRecipes they already have (write different ones, unless they asked you to reuse these):\n  ${existing.join(', ')}` : '',
-  ].filter(Boolean).join('\n');
-}
+const SPOON_DIETS = ['gluten free', 'ketogenic', 'vegetarian', 'lacto-vegetarian',
+  'ovo-vegetarian', 'vegan', 'pescetarian', 'paleo', 'primal', 'low fodmap', 'whole30'];
+const SPOON_INTOLERANCES = ['dairy', 'egg', 'gluten', 'grain', 'peanut', 'seafood',
+  'sesame', 'shellfish', 'soy', 'sulfite', 'tree nut', 'wheat'];
 
-const AI_SYSTEM_PROMPT = [
-  'You are a practical home-cooking meal planner. You write real recipes that a home cook can actually follow on a weeknight, with accurate quantities and clear steps.',
+const AI_SEARCH_SCHEMA = {
+  name: 'recipe_searches',
+  strict: true,
+  schema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['interpretation', 'searches'],
+    properties: {
+      interpretation: {
+        type: 'string',
+        description: 'One sentence on how you read the brief. Shown to the user.'
+      },
+      searches: {
+        type: 'array',
+        description: 'Two to four searches that between them cover the week. Vary the query so the results are not all the same dish.',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['label', 'slot', 'query', 'diet', 'intolerances', 'cuisine', 'excludeIngredients',
+                     'includeIngredients', 'maxReadyTime', 'minFiber', 'maxFat', 'minProtein', 'maxCalories'],
+          properties: {
+            label: { type: 'string', description: 'Short human label, e.g. "quick high-fiber dinners".' },
+            slot: { type: 'string', enum: ['breakfast', 'lunch', 'dinner'], description: 'Which meal these are for.' },
+            query: { type: 'string', description: 'Free-text search term, e.g. "lentil stew". Keep it broad enough to return results.' },
+            diet: { type: 'string', description: 'One of Spoonacular\'s diets, or empty string. Only when the brief clearly calls for it.' },
+            intolerances: { type: 'string', description: 'Comma-separated Spoonacular intolerances, or empty string.' },
+            cuisine: { type: 'string', description: 'Comma-separated cuisines, or empty string.' },
+            excludeIngredients: { type: 'string', description: 'Comma-separated ingredients to rule out, or empty string.' },
+            includeIngredients: { type: 'string', description: 'Comma-separated ingredients to favour, or empty string.' },
+            maxReadyTime: { type: 'integer', description: 'Minutes. 0 means no limit.' },
+            minFiber: { type: 'integer', description: 'Grams per serving. 0 means no target.' },
+            maxFat: { type: 'integer', description: 'Grams per serving. 0 means no target.' },
+            minProtein: { type: 'integer', description: 'Grams per serving. 0 means no target.' },
+            maxCalories: { type: 'integer', description: 'Per serving. 0 means no target.' }
+          }
+        }
+      }
+    }
+  }
+};
+
+const AI_SEARCH_SYSTEM = [
+  'You turn a home cook\'s description of the week they want into searches against the Spoonacular recipe database.',
+  'You are not writing recipes. You are only deciding what to search for.',
   '',
-  'Rules you must follow:',
-  '1. Every entry in "plan" must reference a recipe by its "ref", and every recipe in "recipes" must be used at least once.',
-  '2. A recipe is only written once, however many days it feeds. The first day it appears has leftover=false; every later day eating the same batch has leftover=true.',
-  '3. A recipe\'s "servings" field is the total the recipe as written produces. When a dish covers a cook night plus a leftover night, scale the ingredients up to match and say so in "servings" — do not quietly write a recipe for four and then feed six people from it.',
-  '4. The sum of "servings" across all plan entries pointing at one recipe must not exceed that recipe\'s "servings".',
-  '5. "groceries" covers only what needs buying: count each recipe once regardless of how many days it feeds, add quantities together across recipes, and use sensible shop-sized amounts.',
-  '6. Vary the week. Do not repeat the same protein or the same cuisine on consecutive days unless asked.',
-  '7. Respect any dietary brief precisely. "Low fat" means trimming visible fat and choosing lean cooking methods, not just saying so. "High fiber" means pulses, wholegrains and vegetables doing real work in the dish.',
+  'Guidance:',
+  '- Produce one search per meal slot being planned, occasionally two for a slot when the brief asks for genuinely different things (e.g. "quick midweek, but a proper roast on Sunday").',
+  '- Nutrition targets are per serving. Sensible values: low fat is maxFat around 15, high fiber is minFiber around 8, high protein is minProtein around 25, low calorie is maxCalories around 500. Do not stack every target at once or nothing will match.',
+  '- Use `diet` only for a real dietary pattern the brief names. "Low fat" is not a diet, it is maxFat.',
+  '- Put allergies in `intolerances` when they match Spoonacular\'s list (dairy, egg, gluten, grain, peanut, seafood, sesame, shellfish, soy, sulfite, tree nut, wheat), and anything else in `excludeIngredients`.',
+  '- Keep `query` broad. "chicken" finds plenty; "low fat high fiber chicken traybake for four" finds nothing.',
+  '- Use 0 for any numeric target that does not apply. Use an empty string for any text field that does not apply.',
 ].join('\n');
 
-/* ---------- The call ---------- */
+/* Local fallback for when there's no OpenAI key: read the obvious phrases
+   straight out of the brief. Crude next to a language model, but it covers
+   what people actually type. */
+function localInterpretBrief(prefs) {
+  const text = `${prefs.brief} ${prefs.avoid}`.toLowerCase();
+  const has = (...words) => words.some(w => text.includes(w));
+  const base = { diet: '', intolerances: '', cuisine: '', excludeIngredients: '',
+    includeIngredients: '', maxReadyTime: 0, minFiber: 0, maxFat: 0, minProtein: 0, maxCalories: 0 };
 
-async function callOpenAI(messages) {
+  if (has('vegan')) base.diet = 'vegan';
+  else if (has('vegetarian', 'veggie')) base.diet = 'vegetarian';
+  else if (has('pescetarian', 'pescatarian')) base.diet = 'pescetarian';
+  else if (has('keto')) base.diet = 'ketogenic';
+  else if (has('paleo')) base.diet = 'paleo';
+  else if (has('gluten free', 'gluten-free')) base.diet = 'gluten free';
+
+  if (has('low fat', 'low-fat')) base.maxFat = 15;
+  if (has('high fiber', 'high fibre', 'high-fiber', 'high-fibre')) base.minFiber = 8;
+  if (has('high protein', 'high-protein')) base.minProtein = 25;
+  if (has('low calorie', 'low-calorie', 'light')) base.maxCalories = 500;
+  if (has('low carb', 'low-carb')) base.maxCarbs = 30;
+
+  if (has('quick', 'fast', 'weeknight', '20 minute', '30 minute')) base.maxReadyTime = 30;
+  if (prefs.maxTime) base.maxReadyTime = parseInt(prefs.maxTime, 10) || base.maxReadyTime;
+
+  // Split the avoid list between real intolerances and plain exclusions.
+  if (prefs.avoid) {
+    const items = prefs.avoid.split(/[,;]+/).map(s => s.trim().toLowerCase()).filter(Boolean);
+    const tol = [], exc = [];
+    for (const it of items) {
+      const match = SPOON_INTOLERANCES.find(t => it === t || it === t + 's' || it.includes(t));
+      if (match) tol.push(match); else exc.push(it);
+    }
+    base.intolerances = tol.join(',');
+    base.excludeIngredients = exc.join(',');
+  }
+
+  for (const c of ['italian', 'mexican', 'indian', 'thai', 'chinese', 'japanese',
+                   'greek', 'french', 'spanish', 'korean', 'vietnamese', 'mediterranean']) {
+    if (text.includes(c)) { base.cuisine = c; break; }
+  }
+
+  // One search per slot, with a query that suits that meal.
+  const slotQuery = { breakfast: 'breakfast', lunch: 'lunch', dinner: 'dinner' };
+  return {
+    interpretation: 'Built straight from your settings — add an OpenAI key for a closer read of your notes.',
+    searches: prefs.slots.map(slot => Object.assign({}, base, {
+      label: `${slot} ideas`,
+      slot,
+      query: slotQuery[slot],
+    })),
+  };
+}
+
+async function planSearches(prefs, days) {
+  if (!isAIConfigured()) return localInterpretBrief(prefs);
+  const lines = [
+    `Planning ${prefs.slots.join(' and ')} for seven days, ${prefs.people === 1 ? '1 person' : prefs.people + ' people'}.`,
+    '',
+    'What they wrote:',
+    prefs.brief ? `  "${prefs.brief}"` : '  (nothing specific — keep it varied and balanced)',
+    prefs.maxTime ? `\nHard limit: nothing over ${prefs.maxTime} minutes.` : '',
+    prefs.avoid ? `\nMust avoid: ${prefs.avoid}` : '',
+  ].filter(Boolean).join('\n');
+
+  const raw = await callOpenAI(
+    [{ role: 'system', content: AI_SEARCH_SYSTEM }, { role: 'user', content: lines }],
+    AI_SEARCH_SCHEMA
+  );
+  const searches = (Array.isArray(raw.searches) ? raw.searches : [])
+    .filter(s => s && prefs.slots.includes(s.slot))
+    .slice(0, 5);
+  // If the model gave us nothing usable, fall back rather than fail.
+  if (!searches.length) return localInterpretBrief(prefs);
+  return { interpretation: String(raw.interpretation || ''), searches };
+}
+
+/* ============================================================
+   Stage 2 — actually fetch recipes from Spoonacular
+   ============================================================ */
+
+// Order matters: the least important constraint is dropped first.
+const RELAXATION_ORDER = [
+  { keys: ['maxReadyTime'], label: 'the time limit' },
+  { keys: ['minProtein', 'maxCalories', 'minCarbs', 'maxCarbs'], label: 'the protein and calorie targets' },
+  { keys: ['cuisine', 'includeIngredients'], label: 'the cuisine' },
+  { keys: ['minFiber', 'maxFat'], label: 'the fat and fiber targets' },
+  { keys: ['query'], label: 'the search term' },
+];
+
+function buildSpoonUrl(search, slot, count) {
+  const key = spoonKey();
+  const p = new URLSearchParams();
+  for (const k of SPOON_PARAMS) {
+    const v = search[k];
+    if (v === undefined || v === null || v === '' || v === 0) continue;
+    p.set(k, String(v));
+  }
+  if (!p.has('type')) p.set('type', SLOT_TYPES[slot] || 'main course');
+  p.set('number', String(count));
+  p.set('addRecipeInformation', 'true');
+  p.set('addRecipeInstructions', 'true');
+  p.set('addRecipeNutrition', 'true');
+  p.set('fillIngredients', 'true');
+  p.set('instructionsRequired', 'true');
+  p.set('sort', 'popularity');
+  p.set('apiKey', key);
+  return `https://api.spoonacular.com/recipes/complexSearch?${p.toString()}`;
+}
+
+function nutrientOf(r, name) {
+  const list = (r.nutrition && r.nutrition.nutrients) || [];
+  const n = list.find(x => x.name === name);
+  return n ? Math.round(n.amount) : null;
+}
+
+/* Run one search, dropping constraints a step at a time until it returns
+   something. Reports back which constraints it had to let go of. */
+async function searchWithRelaxation(search, slot, count) {
+  let current = Object.assign({}, search);
+  const relaxed = [];
+
+  for (let attempt = 0; attempt <= RELAXATION_ORDER.length; attempt++) {
+    const resp = await fetch(buildSpoonUrl(current, slot, count));
+    if (resp.status === 402) throw new Error('QUOTA');
+    if (resp.status === 401) throw new Error('SPOON_KEY');
+    if (!resp.ok) throw new Error(`Spoonacular returned an error (${resp.status}).`);
+    const data = await resp.json();
+    const results = (data.results || []).filter(r => r && r.id && r.title);
+    if (results.length >= 2 || attempt === RELAXATION_ORDER.length) {
+      return { results, relaxed };
+    }
+    // Not enough — loosen the next constraint and try again.
+    const step = RELAXATION_ORDER[attempt];
+    let dropped = false;
+    for (const k of step.keys) {
+      if (current[k]) { delete current[k]; dropped = true; }
+    }
+    if (dropped) relaxed.push(step.label);
+  }
+  return { results: [], relaxed };
+}
+
+async function gatherCandidates(searches, prefs) {
+  const bySlot = {};
+  const relaxedAll = new Set();
+  const seen = new Set();
+
+  for (const slot of prefs.slots) {
+    bySlot[slot] = [];
+    const forSlot = searches.filter(s => s.slot === slot);
+    // Ask for a few more than we need so there's room to vary the week.
+    const want = Math.ceil(9 / Math.max(1, forSlot.length));
+    for (const s of forSlot) {
+      const { results, relaxed } = await searchWithRelaxation(s, slot, want);
+      relaxed.forEach(r => relaxedAll.add(r));
+      for (const r of results) {
+        if (seen.has(r.id)) continue;
+        seen.add(r.id);
+        bySlot[slot].push({
+          id: r.id,
+          title: r.title,
+          readyInMinutes: r.readyInMinutes || null,
+          servings: r.servings || 1,
+          calories: nutrientOf(r, 'Calories'),
+          fat: nutrientOf(r, 'Fat'),
+          fiber: nutrientOf(r, 'Fiber'),
+          protein: nutrientOf(r, 'Protein'),
+          diets: r.diets || [],
+          dishTypes: r.dishTypes || [],
+          sourceUrl: r.sourceUrl || '',
+          raw: r,                       // the full record, reused on apply
+        });
+      }
+    }
+  }
+  return { bySlot, relaxed: [...relaxedAll] };
+}
+
+/* ============================================================
+   Stage 3 — decide which recipe goes where
+   ============================================================ */
+
+const AI_ARRANGE_SCHEMA = {
+  name: 'week_arrangement',
+  strict: true,
+  schema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['summary', 'plan'],
+    properties: {
+      summary: { type: 'string', description: 'Two or three sentences on how the week hangs together and how leftovers work.' },
+      plan: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['date', 'slot', 'recipeId', 'servings', 'leftover', 'note'],
+          properties: {
+            date: { type: 'string', description: 'YYYY-MM-DD, one of the dates given.' },
+            slot: { type: 'string', enum: ['breakfast', 'lunch', 'dinner'] },
+            recipeId: { type: 'integer', description: 'MUST be one of the candidate recipe ids provided. Never invent one.' },
+            servings: { type: 'integer', description: 'Portions eaten at this sitting.' },
+            leftover: { type: 'boolean', description: 'True when eating something cooked on an earlier day.' },
+            note: { type: 'string', description: 'Short aside, e.g. "reheat from Sunday". Empty string if nothing to say.' }
+          }
+        }
+      }
+    }
+  }
+};
+
+const AI_ARRANGE_SYSTEM = [
+  'You arrange a week of meals from a fixed list of real recipes. You may only use the recipe ids given to you — you cannot invent, rename, or substitute a recipe. If nothing suitable exists for a slot, leave that slot out.',
+  '',
+  'Rules:',
+  '1. Spread the week out. Do not put the same recipe on consecutive days unless it is an intentional leftover, and avoid repeating a cuisine or main protein two days running.',
+  '2. Leftovers: the first day a recipe appears is the cook (leftover=false). Any later day eating that same batch is leftover=true.',
+  '3. A recipe feeds its stated number of servings in total. The servings you assign across all days using one recipe must not exceed what that recipe makes. If a recipe makes 4 and the household is 2, it can cover a cook night and one leftover night.',
+  '4. Only plan a leftover night when the recipe genuinely makes enough. Do not stretch a 2-serving recipe across two nights for a family of four.',
+  '5. Prefer recipes that fit the brief most closely for the days the brief is most specific about.',
+].join('\n');
+
+function localArrange(bySlot, prefs, days) {
+  const plan = [];
+  const wantLeftovers = prefs.leftovers !== 'none';
+  const aggressive = prefs.leftovers === 'lots';
+
+  for (const slot of prefs.slots) {
+    const pool = (bySlot[slot] || []).slice();
+    if (!pool.length) continue;
+    let i = 0;
+    let d = 0;
+    while (d < days.length) {
+      const r = pool[i % pool.length];
+      i++;
+      plan.push({ date: days[d].date, slot, recipeId: r.id, servings: prefs.people, leftover: false, note: '' });
+      d++;
+      // If it makes enough for another sitting, use tomorrow up as leftovers.
+      const spare = Math.floor(r.servings / prefs.people) - 1;
+      if (wantLeftovers && spare >= 1 && d < days.length) {
+        const nights = aggressive ? Math.min(spare, 2) : 1;
+        for (let n = 0; n < nights && d < days.length; n++) {
+          plan.push({ date: days[d].date, slot, recipeId: r.id, servings: prefs.people, leftover: true, note: 'leftovers' });
+          d++;
+        }
+      }
+    }
+  }
+  return {
+    summary: wantLeftovers
+      ? 'Filled from the recipes Spoonacular returned, repeating anything that makes enough for a second night.'
+      : 'Filled from the recipes Spoonacular returned, something different every day.',
+    plan,
+  };
+}
+
+async function arrangeWeek(bySlot, prefs, days, extraInstruction) {
+  if (!isAIConfigured()) return localArrange(bySlot, prefs, days);
+
+  const lines = [
+    `Arrange ${prefs.slots.join(' and ')} for these days, cooking for ${prefs.people === 1 ? '1 person' : prefs.people + ' people'}:`,
+    ...days.map(d => `  ${d.name} — ${d.date}`),
+    '',
+    'What they asked for:',
+    prefs.brief ? `  "${prefs.brief}"` : '  (nothing specific)',
+    '',
+    `Leftovers: ${{
+      none: 'they do not want leftovers — every meal freshly cooked, no repeats.',
+      some: 'a couple of leftover meals across the week is welcome.',
+      lots: 'they want to batch cook — lean on recipes that stretch across two or three sittings.',
+    }[prefs.leftovers] || ''}`,
+    '',
+    'Available recipes:',
+  ];
+  for (const slot of prefs.slots) {
+    lines.push(`\n  For ${slot}:`);
+    for (const r of (bySlot[slot] || [])) {
+      const bits = [
+        `id ${r.id}`,
+        `"${r.title}"`,
+        `serves ${r.servings}`,
+        r.readyInMinutes ? `${r.readyInMinutes} min` : '',
+        r.calories ? `${r.calories} kcal` : '',
+        r.fat != null ? `${r.fat}g fat` : '',
+        r.fiber != null ? `${r.fiber}g fiber` : '',
+        r.protein != null ? `${r.protein}g protein` : '',
+        (r.diets || []).length ? `[${r.diets.slice(0, 3).join(', ')}]` : '',
+      ].filter(Boolean);
+      lines.push('    ' + bits.join(' · '));
+    }
+  }
+  if (extraInstruction) lines.push(`\nAdditional instruction from the user: ${extraInstruction}`);
+
+  const raw = await callOpenAI(
+    [{ role: 'system', content: AI_ARRANGE_SYSTEM }, { role: 'user', content: lines.join('\n') }],
+    AI_ARRANGE_SCHEMA
+  );
+  if (!raw || !Array.isArray(raw.plan) || !raw.plan.length) return localArrange(bySlot, prefs, days);
+  return raw;
+}
+
+/* ============================================================
+   The OpenAI call itself
+   ============================================================ */
+
+async function callOpenAI(messages, schema) {
   const key = aiKey();
   if (!key) throw new Error('NO_KEY');
   const base = (aiCfg().baseUrl || 'https://api.openai.com/v1').replace(/\/$/, '');
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 120000);
+  const timeout = setTimeout(() => controller.abort(), 90000);
   let resp;
   try {
     resp = await fetch(`${base}/chat/completions`, {
       method: 'POST',
       signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${key}`,
-      },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
       body: JSON.stringify({
         model: aiCfg().model || 'gpt-4o-mini',
         messages,
         temperature: 0.7,
-        response_format: { type: 'json_schema', json_schema: AI_PLAN_SCHEMA },
+        response_format: { type: 'json_schema', json_schema: schema },
       }),
     });
   } catch (e) {
@@ -3583,25 +3898,24 @@ async function callOpenAI(messages) {
   const data = await resp.json();
   const choice = data.choices && data.choices[0];
   if (choice && choice.finish_reason === 'length') {
-    throw new Error('The reply got cut off before it was finished. Try planning fewer meal slots, or switch to a model with more room.');
+    throw new Error('The reply got cut off before it was finished. Try planning fewer meal slots at once.');
   }
   const text = choice && choice.message && choice.message.content;
   if (!text) throw new Error('OpenAI sent back an empty reply. Try again.');
-  try {
-    return JSON.parse(text);
-  } catch (e) {
-    throw new Error('OpenAI\'s reply wasn\'t readable. Try again.');
-  }
+  try { return JSON.parse(text); }
+  catch (e) { throw new Error('OpenAI\'s reply wasn\'t readable. Try again.'); }
 }
 
-/* ---------- Generate ---------- */
+/* ============================================================
+   Putting it together
+   ============================================================ */
 
-async function generateAIMealPlan() {
+async function generateAIMealPlan(extraInstruction) {
   const status = document.getElementById('aiStatus');
   const btn = document.getElementById('aiGenerateBtn');
 
-  if (!isAIConfigured()) {
-    status.innerHTML = '<div class="error">No OpenAI key set up yet — see AI-SETUP.md.</div>';
+  if (!spoonKey()) {
+    status.innerHTML = '<div class="error">No Spoonacular key set up — see SPOONACULAR-SETUP.md.</div>';
     return;
   }
   const prefs = readAIPrefsFromForm();
@@ -3615,71 +3929,107 @@ async function generateAIMealPlan() {
   startCookingPhraseLoop(status, AI_PLANNING_PHRASES);
 
   try {
-    const messages = [
-      { role: 'system', content: AI_SYSTEM_PROMPT },
-      { role: 'user', content: buildAIPlanPrompt(prefs, days) },
-    ];
-    const plan = await callOpenAI(messages);
+    const { interpretation, searches } = await planSearches(prefs, days);
+    const { bySlot, relaxed } = await gatherCandidates(searches, prefs);
+
+    const total = Object.values(bySlot).reduce((n, l) => n + l.length, 0);
+    if (!total) {
+      stopCookingPhraseLoop();
+      btn.disabled = false;
+      status.innerHTML = `
+        <div class="error">
+          <strong>Spoonacular didn't have anything matching.</strong> Even after
+          loosening the search it came back empty. Try a broader brief, or
+          fewer restrictions in the avoid list.
+        </div>`;
+      return;
+    }
+
+    const arranged = await arrangeWeek(bySlot, prefs, days, extraInstruction);
     stopCookingPhraseLoop();
     status.innerHTML = '';
     btn.disabled = false;
 
-    // Keep the conversation so "refine" can build on it rather than starting over.
-    window._aiPlanDraft = {
-      plan: normalizeAIPlan(plan, days, prefs),
-      messages: messages.concat([{ role: 'assistant', content: JSON.stringify(plan) }]),
-      days, prefs,
-    };
+    window._aiPlanDraft = normalizePlan(arranged, bySlot, prefs, days, { interpretation, relaxed });
     openAIPlanPreview();
   } catch (e) {
     stopCookingPhraseLoop();
     btn.disabled = false;
-    status.innerHTML = `<div class="error">${escapeHtml(e.message)}</div>`;
+    let msg = e.message;
+    if (msg === 'QUOTA') msg = 'Spoonacular\'s daily quota is used up. It resets at midnight UTC — or upgrade your plan.';
+    if (msg === 'SPOON_KEY') msg = 'Spoonacular rejected the key in spoonacular-config.js. Check it\'s current.';
+    if (msg === 'NO_KEY') msg = 'No OpenAI key configured.';
+    status.innerHTML = `<div class="error">${escapeHtml(msg)}</div>`;
   }
 }
 
-/* Tidy up whatever came back so the preview and apply steps can trust it:
-   drop plan entries pointing at dates or refs that don't exist, drop slots
-   the user didn't ask for, and drop recipes nothing references. */
-function normalizeAIPlan(raw, days, prefs) {
+/* Make whatever came back safe to show and apply: only real candidate ids,
+   only requested slots, only dates in this week, one meal per slot, and
+   leftovers that actually have something to be left over from. */
+function normalizePlan(arranged, bySlot, prefs, days, meta) {
   const validDates = new Set(days.map(d => d.date));
-  const recipes = Array.isArray(raw.recipes) ? raw.recipes.filter(r => r && r.ref && r.title) : [];
-  const byRef = new Map(recipes.map(r => [r.ref, r]));
+  const byId = new Map();
+  for (const slot of Object.keys(bySlot)) {
+    for (const r of bySlot[slot]) byId.set(r.id, r);
+  }
 
-  const plan = (Array.isArray(raw.plan) ? raw.plan : []).filter(p =>
-    p && validDates.has(p.date) && AI_SLOTS.includes(p.slot) &&
-    prefs.slots.includes(p.slot) && byRef.has(p.ref)
-  );
+  let plan = (Array.isArray(arranged.plan) ? arranged.plan : []).filter(p =>
+    p && validDates.has(p.date) && prefs.slots.includes(p.slot) && byId.has(Number(p.recipeId))
+  ).map(p => ({
+    date: p.date,
+    slot: p.slot,
+    recipeId: Number(p.recipeId),
+    servings: Math.max(1, Number(p.servings) || prefs.people),
+    leftover: !!p.leftover,
+    note: String(p.note || ''),
+  }));
 
-  // One meal per slot — if the model doubled up, the first one wins.
+  // One meal per slot; first wins.
   const seen = new Set();
-  const deduped = plan.filter(p => {
+  plan = plan.filter(p => {
     const k = p.date + '|' + p.slot;
     if (seen.has(k)) return false;
     seen.add(k);
     return true;
   });
 
-  // A recipe marked leftover on its very first appearance has nothing to be
-  // left over from, so treat that first sitting as the cook.
   const order = ['breakfast', 'lunch', 'dinner'];
-  deduped.sort((a, b) => a.date.localeCompare(b.date) || order.indexOf(a.slot) - order.indexOf(b.slot));
+  plan.sort((a, b) => a.date.localeCompare(b.date) || order.indexOf(a.slot) - order.indexOf(b.slot));
+
+  // First appearance of a recipe is always the cook, and a batch can't be
+  // stretched past what the recipe actually makes.
   const cooked = new Set();
-  for (const p of deduped) {
-    if (!cooked.has(p.ref)) { p.leftover = false; cooked.add(p.ref); }
-    else p.leftover = !!p.leftover;
+  const used = new Map();
+  const kept = [];
+  for (const p of plan) {
+    const r = byId.get(p.recipeId);
+    if (!cooked.has(p.recipeId)) { p.leftover = false; cooked.add(p.recipeId); }
+    const already = used.get(p.recipeId) || 0;
+    if (p.leftover && already + p.servings > r.servings) {
+      // The batch is spent — drop this sitting rather than pretend.
+      continue;
+    }
+    used.set(p.recipeId, already + p.servings);
+    kept.push(p);
   }
 
-  const usedRefs = new Set(deduped.map(p => p.ref));
+  const usedIds = new Set(kept.map(p => p.recipeId));
   return {
-    summary: String(raw.summary || ''),
-    recipes: recipes.filter(r => usedRefs.has(r.ref)),
-    plan: deduped,
-    groceries: Array.isArray(raw.groceries) ? raw.groceries.filter(g => g && g.item) : [],
+    summary: String(arranged.summary || ''),
+    interpretation: meta.interpretation || '',
+    relaxed: meta.relaxed || [],
+    plan: kept,
+    recipes: [...usedIds].map(id => byId.get(id)),
+    // Everything Spoonacular gave us, kept so "Refine" can rearrange without
+    // spending more of the daily quota.
+    bySlot,
+    prefs, days,
   };
 }
 
-/* ---------- Preview ---------- */
+/* ============================================================
+   Preview
+   ============================================================ */
 
 function openAIPlanPreview() {
   document.getElementById('modalRoot').innerHTML = `
@@ -3692,75 +4042,84 @@ function openAIPlanPreview() {
 function renderAIPlanPreview() {
   const draft = window._aiPlanDraft;
   if (!draft) return;
-  const { plan, days } = draft;
-  const byRef = new Map(plan.recipes.map(r => [r.ref, r]));
+  const { plan, days, prefs } = draft;
+  const byId = new Map(draft.recipes.map(r => [r.id, r]));
 
-  const planned = new Set(plan.plan.map(p => p.date + '|' + p.slot));
-  // Warn before we quietly overwrite something they put there by hand.
-  const clashes = [...planned].filter(k => {
-    const [date, slot] = k.split('|');
-    return !!mealEntry(date, slot);
-  }).length;
+  const clashes = plan.filter(p => !!mealEntry(p.date, p.slot)).length;
+  const emptySlots = days.length * prefs.slots.length - plan.length;
 
   const dayHtml = days.map(d => {
-    const meals = plan.plan.filter(p => p.date === d.date);
+    const meals = plan.filter(p => p.date === d.date);
     if (!meals.length) return '';
     return `
       <div class="ai-preview-day">
         <div class="ai-preview-day-name">${d.name} <span class="text-muted" style="font-weight:400;">${d.date.slice(5)}</span></div>
         ${meals.map(m => {
-          const r = byRef.get(m.ref);
+          const r = byId.get(m.recipeId) || {};
+          const facts = [
+            r.readyInMinutes ? `${r.readyInMinutes} min` : '',
+            r.calories ? `${r.calories} kcal` : '',
+            r.fat != null ? `${r.fat}g fat` : '',
+            r.fiber != null ? `${r.fiber}g fiber` : '',
+          ].filter(Boolean).join(' · ');
           return `<div class="ai-preview-meal">
             <span class="ai-preview-slot">${m.slot}</span>
             <span class="ai-preview-title">
-              ${m.leftover ? '<span class="leftover-tag">Leftovers</span> ' : ''}${escapeHtml(r ? r.title : m.ref)}
+              ${m.leftover ? '<span class="leftover-tag">Leftovers</span> ' : ''}${escapeHtml(r.title || '')}
+              ${facts ? `<span class="ai-preview-note">${escapeHtml(facts)}</span>` : ''}
               ${m.note ? `<span class="ai-preview-note">${escapeHtml(m.note)}</span>` : ''}
             </span>
-            <span class="text-muted" style="font-size:12px; white-space:nowrap;">${m.servings || ''}${m.servings ? ' serv' : ''}</span>
+            <span class="text-muted" style="font-size:12px; white-space:nowrap;">${m.servings} serv</span>
           </div>`;
         }).join('')}
       </div>`;
   }).join('');
 
-  const cookCount = plan.plan.filter(p => !p.leftover).length;
-  const leftoverCount = plan.plan.length - cookCount;
+  const cookCount = plan.filter(p => !p.leftover).length;
+  const leftoverCount = plan.length - cookCount;
 
   document.getElementById('aiPreviewModal').innerHTML = `
     <h3>Here's the week</h3>
-    ${plan.summary ? `<p class="text-muted" style="margin-top:-8px; font-size:13.5px;">${escapeHtml(plan.summary)}</p>` : ''}
+    ${draft.interpretation ? `<p class="text-muted" style="margin-top:-8px; font-size:13px;"><em>${escapeHtml(draft.interpretation)}</em></p>` : ''}
+    ${draft.summary ? `<p class="text-muted" style="font-size:13.5px;">${escapeHtml(draft.summary)}</p>` : ''}
     <p style="font-size:13px; margin:0 0 14px;">
-      <span class="badge">${plan.recipes.length} new recipe${plan.recipes.length === 1 ? '' : 's'}</span>
+      <span class="badge">${draft.recipes.length} recipe${draft.recipes.length === 1 ? '' : 's'} from Spoonacular</span>
       <span class="badge">${cookCount} cook${cookCount === 1 ? '' : 's'}</span>
       ${leftoverCount ? `<span class="badge">${leftoverCount} leftover meal${leftoverCount === 1 ? '' : 's'}</span>` : ''}
-      ${plan.groceries.length ? `<span class="badge">${plan.groceries.length} grocery item${plan.groceries.length === 1 ? '' : 's'}</span>` : ''}
     </p>
 
-    ${dayHtml || '<div class="error">The plan came back empty. Try regenerating.</div>'}
+    ${draft.relaxed.length ? `
+      <div class="notice" style="font-size:12.5px;">
+        Nothing matched your brief exactly, so the search was loosened on
+        ${escapeHtml(draft.relaxed.join(', '))}.
+      </div>` : ''}
+    ${emptySlots > 0 ? `
+      <div class="notice" style="font-size:12.5px;">
+        ${emptySlots} slot${emptySlots === 1 ? '' : 's'} left empty — Spoonacular
+        didn't have enough that fitted. Fill them by hand, or try a broader brief.
+      </div>` : ''}
 
-    ${plan.groceries.length ? `
-      <div class="ai-preview-section">Shopping</div>
-      <p class="text-muted" style="font-size:12.5px; margin:0;">
-        ${escapeHtml(plan.groceries.slice(0, 8).map(g => g.item).join(', '))}${plan.groceries.length > 8 ? `, and ${plan.groceries.length - 8} more` : ''}
-      </p>` : ''}
+    ${dayHtml || '<div class="error">Nothing could be planned. Try a broader brief.</div>'}
 
     <div class="ai-opts">
-      <label><input type="checkbox" id="aiOptGroceries" checked /> Add the shopping to my list</label>
+      <label><input type="checkbox" id="aiOptGroceries" checked /> Rebuild my shopping list from this week</label>
       <label><input type="checkbox" id="aiOptReplace" ${clashes ? '' : 'checked'} />
         Overwrite meals already planned this week${clashes ? ` <span class="text-muted">(${clashes} slot${clashes === 1 ? '' : 's'} would change)</span>` : ''}</label>
     </div>
 
-    <div class="ai-preview-section">Not quite right?</div>
-    <div class="ai-refine">
-      <input type="text" id="aiRefineInput" placeholder="e.g. swap Tuesday for something vegetarian"
-             onkeydown="if(event.key==='Enter') refineAIPlan()" />
-      <button class="btn-secondary btn-small" onclick="refineAIPlan()">Refine</button>
-    </div>
-    <div id="aiRefineStatus"></div>
+    ${isAIConfigured() ? `
+      <div class="ai-preview-section">Not quite right?</div>
+      <div class="ai-refine">
+        <input type="text" id="aiRefineInput" placeholder="e.g. swap Tuesday for something vegetarian"
+               onkeydown="if(event.key==='Enter') refineAIPlan()" />
+        <button class="btn-secondary btn-small" onclick="refineAIPlan()">Refine</button>
+      </div>
+      <div id="aiRefineStatus"></div>` : ''}
 
     <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:18px; flex-wrap:wrap;">
       <button class="btn-secondary btn-small" onclick="closeModal()">Cancel</button>
       <button class="btn-secondary btn-small" onclick="regenerateAIPlan()">Start over</button>
-      <button class="btn" onclick="applyAIPlan()">Add to my week</button>
+      <button class="btn" onclick="applyAIPlan()" ${plan.length ? '' : 'disabled'}>Add to my week</button>
     </div>`;
 }
 
@@ -3775,18 +4134,13 @@ async function refineAIPlan() {
   input.disabled = true;
   startCookingPhraseLoop(status, AI_PLANNING_PHRASES);
   try {
-    const messages = draft.messages.concat([{
-      role: 'user',
-      content: `${ask}\n\nKeep everything else about the plan as it was. Return the complete plan again, not just the part that changed.`,
-    }]);
-    const revised = await callOpenAI(messages);
+    // Rearranging the candidates we already have costs no extra Spoonacular
+    // quota — only the slot assignments change.
+    const arranged = await arrangeWeek(draft.bySlot, draft.prefs, draft.days, ask);
     stopCookingPhraseLoop();
-    window._aiPlanDraft = {
-      plan: normalizeAIPlan(revised, draft.days, draft.prefs),
-      messages: messages.concat([{ role: 'assistant', content: JSON.stringify(revised) }]),
-      days: draft.days,
-      prefs: draft.prefs,
-    };
+    window._aiPlanDraft = normalizePlan(arranged, draft.bySlot, draft.prefs, draft.days, {
+      interpretation: draft.interpretation, relaxed: draft.relaxed,
+    });
     renderAIPlanPreview();
   } catch (e) {
     stopCookingPhraseLoop();
@@ -3800,67 +4154,61 @@ function regenerateAIPlan() {
   generateAIMealPlan();
 }
 
-/* ---------- Apply ---------- */
+/* ============================================================
+   Apply
+   ============================================================ */
 
-function applyAIPlan() {
+async function applyAIPlan() {
   const draft = window._aiPlanDraft;
   if (!draft) return closeModal();
   const { plan } = draft;
   const replace = document.getElementById('aiOptReplace').checked;
   const wantGroceries = document.getElementById('aiOptGroceries').checked;
 
-  // Save the recipes first so the plan has real ids to point at.
-  const refToId = new Map();
-  for (const r of plan.recipes) {
-    const recipe = {
-      id: uid(),
-      title: String(r.title || 'Untitled Recipe').trim(),
-      description: String(r.description || '').trim(),
-      image: '',
-      category: r.category || 'Dinner',
-      tags: (Array.isArray(r.tags) ? r.tags : []).filter(t => t && t.length <= 28).slice(0, 6),
-      prepTime: Number(r.prepTime) || 0,
-      cookTime: Number(r.cookTime) || 0,
-      servings: Number(r.servings) || 1,
-      ingredients: (Array.isArray(r.ingredients) ? r.ingredients : [])
-        .filter(i => i && i.name)
-        .map(i => ({ amount: String(i.amount || ''), unit: String(i.unit || ''), name: String(i.name) })),
-      instructions: (Array.isArray(r.instructions) ? r.instructions : []).filter(s => s && s.trim()),
-      notes: String(r.notes || '').trim(),
-      sourceUrl: '',
-      favorite: false,
-      aiGenerated: true,
-      createdAt: Date.now(),
-    };
+  const modal = document.getElementById('aiPreviewModal');
+  modal.innerHTML = '<h3>Saving the week</h3><div class="notice"><span class="spinner"></span> Fetching the full recipes...</div>';
+
+  // Reuse a recipe already in the collection rather than saving it twice.
+  const idToRecipeId = new Map();
+  const toSave = [];
+  for (const cand of draft.recipes) {
+    const existing = state.recipes.find(r => r.spoonId === cand.id);
+    if (existing) { idToRecipeId.set(cand.id, existing.id); continue; }
+    toSave.push(cand);
+  }
+
+  // Spoonacular re-segments instructions; where we can reach the original
+  // site, its own step grouping reads better. Best-effort and parallel.
+  const converted = await Promise.all(toSave.map(async cand => {
+    const recipe = convertSpoonacularRecipe(cand.raw);
+    try {
+      const srcSteps = await fetchSourceInstructions(recipe.sourceUrl);
+      if (srcSteps && srcSteps.length >= 2) recipe.instructions = srcSteps;
+    } catch (e) { /* keep Spoonacular's steps */ }
+    return { cand, recipe };
+  }));
+
+  for (const { cand, recipe } of converted) {
+    recipe.id = uid();
+    recipe.spoonId = cand.id;
+    recipe.createdAt = Date.now();
     state.recipes.push(recipe);
-    refToId.set(r.ref, recipe.id);
+    idToRecipeId.set(cand.id, recipe.id);
   }
 
   let filled = 0, skipped = 0;
-  for (const p of plan.plan) {
-    const id = refToId.get(p.ref);
-    if (!id) continue;
+  for (const p of plan) {
+    const rid = idToRecipeId.get(p.recipeId);
+    if (!rid) continue;
     if (!replace && mealEntry(p.date, p.slot)) { skipped++; continue; }
     if (!state.mealplan[p.date]) state.mealplan[p.date] = {};
     state.mealplan[p.date][p.slot] = {
-      id,
+      id: rid,
       leftover: !!p.leftover,
-      servings: Number(p.servings) || null,
-      note: String(p.note || ''),
+      servings: p.servings || null,
+      note: p.note || '',
     };
     filled++;
-  }
-
-  let added = 0;
-  if (wantGroceries && plan.groceries.length) {
-    const have = new Set(state.shopping.map(s => String(s.item).trim().toLowerCase()));
-    for (const g of plan.groceries) {
-      const item = String(g.item).trim();
-      if (!item || have.has(item.toLowerCase())) continue;
-      state.shopping.push({ item, checked: false, category: g.category || 'Other' });
-      have.add(item.toLowerCase());
-      added++;
-    }
   }
 
   save();
@@ -3868,16 +4216,23 @@ function applyAIPlan() {
   window._aiPlanDraft = null;
   renderMealPlan();
 
+  // The shopping list is built locally from the real ingredients, which is
+  // both more accurate than asking a model and free.
+  let items = 0;
+  if (wantGroceries) {
+    rebuildShoppingList();
+    items = state.shopping.length;
+  }
+
   const bits = [`${filled} meal${filled === 1 ? '' : 's'} planned`];
-  if (plan.recipes.length) bits.push(`${plan.recipes.length} recipe${plan.recipes.length === 1 ? '' : 's'} saved`);
-  if (added) bits.push(`${added} item${added === 1 ? '' : 's'} on the shopping list`);
+  if (converted.length) bits.push(`${converted.length} recipe${converted.length === 1 ? '' : 's'} saved`);
+  if (items) bits.push(`${items} item${items === 1 ? '' : 's'} on the shopping list`);
   if (skipped) bits.push(`${skipped} slot${skipped === 1 ? '' : 's'} left as they were`);
-  document.getElementById('aiStatus').innerHTML =
-    `<div class="success">✓ ${escapeHtml(bits.join(' · '))}</div>`;
-  setTimeout(() => {
-    const s = document.getElementById('aiStatus');
-    if (s) s.innerHTML = '';
-  }, 8000);
+  const s = document.getElementById('aiStatus');
+  if (s) {
+    s.innerHTML = `<div class="success">✓ ${escapeHtml(bits.join(' · '))}</div>`;
+    setTimeout(() => { const e2 = document.getElementById('aiStatus'); if (e2) e2.innerHTML = ''; }, 8000);
+  }
 }
 
 /* ---------- Init ---------- */
