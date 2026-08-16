@@ -2,13 +2,14 @@
  * Caches the app shell so it works offline once installed.
  * Bump CACHE_VERSION whenever you change the HTML and want users to get the update.
  */
-const CACHE_VERSION = 'cookbook-v23-step-grouping';
+const CACHE_VERSION = 'cookbook-v25-ai-meal-plans';
 const ASSETS = [
   './',
   './cookbook-fresh.html',
   './manifest.json',
   './firebase-config.js',
   './spoonacular-config.js',
+  './ai-config.js',
   './icons/icon-120.png',
   './icons/icon-152.png',
   './icons/icon-167.png',
@@ -20,8 +21,12 @@ const ASSETS = [
 
 self.addEventListener('install', e => {
   // Cache the app shell immediately on install.
+  // addAll() rejects the whole install if any one file 404s, so each asset is
+  // fetched on its own — a missing icon shouldn't stop the app working offline.
   e.waitUntil(
-    caches.open(CACHE_VERSION).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting())
+    caches.open(CACHE_VERSION)
+      .then(c => Promise.all(ASSETS.map(a => c.add(a).catch(() => {}))))
+      .then(() => self.skipWaiting())
   );
 });
 
@@ -56,4 +61,9 @@ self.addEventListener('fetch', e => {
     e.respondWith(
       caches.match(e.request).then(cached => cached || fetch(e.request).then(resp => {
         const copy = resp.clone();
-        caches.open(CACHE_VERSION).then(c => c.put(e.reque
+        caches.open(CACHE_VERSION).then(c => c.put(e.request, copy));
+        return resp;
+      }))
+    );
+  }
+});
