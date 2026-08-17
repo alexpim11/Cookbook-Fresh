@@ -2,7 +2,7 @@
  * Caches the app shell so it works offline once installed.
  * Bump CACHE_VERSION whenever you change the HTML and want users to get the update.
  */
-const CACHE_VERSION = 'cookbook-v28-instruction-repair';
+const CACHE_VERSION = 'cookbook-v29-step-numbering';
 const ASSETS = [
   './',
   './cookbook-fresh.html',

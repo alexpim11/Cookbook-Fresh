@@ -2596,11 +2596,26 @@ function addShoppingItem() {
 async function repairInstructions() {
   const splitFixed = [];
   for (const r of state.recipes) {
-    const cur = r.instructions || [];
-    if (cur.length === 1 && String(cur[0]).length > 260) {
+    const cur = (r.instructions || []).map(s => String(s));
+    if (!cur.length) continue;
+    const before = cur.join(' ');
+
+    // An earlier split may have cut a numbered paragraph in the wrong places,
+    // leaving "1." and "2." stranded mid-step. Putting it back together and
+    // splitting on the author's own numbering fixes those.
+    const joined = tidySpacing(cur.join(' '));
+    const renum = splitOnStepNumbers(joined);
+    if (renum && renum.length >= 2) {
+      r.instructions = renum.map(s => stripStepPrefix(stripBullet(s))).filter(Boolean);
+    } else if (cur.length === 1 && cur[0].length > 260) {
       const split = paragraphToSteps(cur[0]);
-      if (split.length > 1) { r.instructions = split; splitFixed.push(r.title); }
+      if (split.length > 1) r.instructions = split;
+    } else {
+      // Even when the split is fine, the text may carry HTML entities,
+      // mojibake or stray bullets.
+      r.instructions = cur.map(s => stripStepPrefix(stripBullet(tidySpacing(s)))).filter(Boolean);
     }
+    if (r.instructions.join(' ') !== before) splitFixed.push(r.title);
   }
 
   // Anything still unusable that we know the Spoonacular id for can be
@@ -3305,26 +3320,108 @@ function stripHtml(s) {
 
 // Tidy up run-together text: restore the space after sentence punctuation
 // (e.g. "350 degrees.Wrap" -> "350 degrees. Wrap") without touching decimals.
+/* Recipe text arrives with HTML entities ("&amp;", "&frac12;"), and sometimes
+   with mojibake from a page that was mis-decoded somewhere upstream. Both show
+   up as "random symbols" in the middle of a step. */
+const MOJIBAKE = [
+  ['â€™', '’'], ['â€˜', '‘'], ['â€œ', '“'], ['â€', '”'],
+  ['â€"', '—'], ['â€"', '–'], ['â€¦', '…'], ['Â°', '°'],
+  ['Â½', '½'], ['Â¼', '¼'], ['Â¾', '¾'], ['Ã©', 'é'],
+  ['Ã¨', 'è'], ['Ã ', 'à'], ['Â ', ' '],
+];
+function decodeEntities(s) {
+  let t = String(s || '');
+  if (t.indexOf('&') !== -1) {
+    // A textarea decodes entities without executing anything.
+    const el = document.createElement('textarea');
+    el.innerHTML = t;
+    t = el.value;
+  }
+  if (t.indexOf('Ã') !== -1 || t.indexOf('Â') !== -1 || t.indexOf('â€') !== -1) {
+    for (const [bad, good] of MOJIBAKE) t = t.split(bad).join(good);
+  }
+  return t;
+}
+
 function tidySpacing(s) {
-  return String(s || '')
+  return decodeEntities(s)
+    .replace(/[   ]/g, ' ')        // non-breaking spaces
+    .replace(/[​-‍﻿­]/g, '')  // zero-width and soft hyphens
     .replace(/\s+/g, ' ')
     .replace(/([.!?])([A-Z])/g, '$1 $2')
+    // A step number glued to the previous sentence ("...oven.1.Chop") needs
+    // prising apart before anything can find the numbering.
+    .replace(/([.!?])(\d{1,2}\s*[.):])/g, '$1 $2')
+    .replace(/(\d{1,2}[.):])([A-Za-z])/g, '$1 $2')
     .replace(/([,;:])(\S)/g, (m, p, c) => /\d/.test(c) ? m : p + ' ' + c)
     .replace(/\s+/g, ' ')
     .trim();
 }
 
+/* Leading list decoration that isn't part of the instruction. */
+function stripBullet(s) {
+  return String(s).replace(/^[\s•▢●·*–—\-▪▫]+/, '').trim();
+}
+
 function stripStepPrefix(s) {
-  return String(s).replace(/^\s*(?:step\s*)?\d+\s*[.):\-]\s*/i, '').trim();
+  return String(s)
+    .replace(/^\s*\(?\s*(?:step\s*)?\d{1,2}\s*[.):–\-]\s*/i, '')
+    .replace(/^\s*step\s+\d{1,2}\s+/i, '')
+    .trim();
 }
 
 // Split a plain-text blob on explicit numbered markers ("1. ... 2. ..."). Only
 // splits when the text actually looks like a numbered list, so it never invents
 // fragments from ordinary sentences.
+/* Find explicit step numbering inside a block of text and split on it.
+
+   Recipes write this every imaginable way — "1." / "1)" / "(1)" / "1:" /
+   "Step 1" / "STEP 1:" — sometimes with no space after the marker, and often
+   glued straight onto the previous sentence. The old version only recognised
+   "1. " with spaces on both sides, which is why numbered paragraphs were
+   falling through to sentence splitting and leaving stray digits mid-step.
+
+   Returns null unless it finds a convincing run (1, 2, 3, ...), so a stray
+   "1)" in prose or a quantity like "1.5 cups" can't trigger a split. */
+function splitOnStepNumbers(text) {
+  const t = String(text || '');
+  // group 1: the boundary before the marker, so we know where the marker starts
+  // group 2: optional "step" word, group 3: the digits
+  const re = /(^|[\s.;:!?)\]"'])(?:step\s*)?\(?(\d{1,2})\s*[.):–-]\s*(?=[A-Za-z])/gi;
+  const marks = [];
+  let m;
+  while ((m = re.exec(t)) !== null) {
+    marks.push({ n: Number(m[2]), start: m.index + m[1].length, end: re.lastIndex });
+    // Allow the next match to start where this marker's boundary was, so
+    // back-to-back markers aren't missed.
+    re.lastIndex = m.index + m[0].length;
+  }
+  if (marks.length < 2) return null;
+
+  // Keep only a properly ascending run beginning at 1. Anything else is a
+  // number that happens to look like a marker.
+  const seq = [];
+  for (const mk of marks) {
+    if (mk.n === (seq.length ? seq[seq.length - 1].n + 1 : 1)) seq.push(mk);
+  }
+  if (seq.length < 2) return null;
+
+  const out = [];
+  const preamble = t.slice(0, seq[0].start).trim();
+  // Text before "1." is usually a heading ("Instructions") — keep it only if
+  // it looks like an actual instruction.
+  if (preamble.length > 25) out.push(preamble);
+  for (let i = 0; i < seq.length; i++) {
+    const to = (i + 1 < seq.length) ? seq[i + 1].start : t.length;
+    const piece = t.slice(seq[i].end, to).trim();
+    if (piece) out.push(piece);
+  }
+  return out.length >= 2 ? out.map(s => stripBullet(s)).filter(Boolean) : null;
+}
+
+// Kept for the older callers; now backed by the tolerant version above.
 function splitNumbered(text) {
-  if (!/(^|\s)1[.)]\s/.test(text) || !/(^|\s)2[.)]\s/.test(text)) return [text];
-  const parts = text.split(/\s+(?=\d{1,2}[.)]\s)/).map(s => s.trim()).filter(Boolean);
-  return parts.length > 1 ? parts : [text];
+  return splitOnStepNumbers(text) || [text];
 }
 
 // Turn an instructions HTML/text blob into discrete steps, preserving the source
@@ -3392,11 +3489,13 @@ function pickBestSteps(candidates) {
    actually follow and tick off. */
 function paragraphToSteps(text) {
   const t = tidySpacing(text);
-  if (t.length < 260) return [t];
 
-  // "1. Do this 2. Do that" hiding inside the paragraph.
-  const numbered = splitNumbered(t);
-  if (numbered.length > 1) return numbered.map(stripStepPrefix).filter(Boolean);
+  // Numbering is the author's own step boundaries, so it always wins — even on
+  // a short paragraph, and before any sentence guessing.
+  const numbered = splitOnStepNumbers(t);
+  if (numbered) return numbered.map(s => stripStepPrefix(stripBullet(s))).filter(Boolean);
+
+  if (t.length < 260) return [t];
 
   // Otherwise fall back to sentences, grouped so each step is a sensible size.
   // Split keeps the punctuation so sentences stay readable.
