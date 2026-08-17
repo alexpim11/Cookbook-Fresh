@@ -828,7 +828,9 @@
       <select id="categoryFilter" class="select-pill" onchange="renderRecipes()">
         <option value="">All categories</option>
       </select>
-      <button class="btn-ghost" style="font-size:12px; margin-left:auto;" onclick="resetAllData()" title="Clear everything">↻ Reset</button>
+      <button class="btn-ghost" style="font-size:12px; margin-left:auto;" onclick="repairInstructions()"
+              title="Re-split walls of text and re-fetch missing steps">🛠 Fix instructions</button>
+      <button class="btn-ghost" style="font-size:12px;" onclick="resetAllData()" title="Clear everything">↻ Reset</button>
     </div>
 
     <div id="recipeGrid" class="grid"></div>
@@ -2180,9 +2182,18 @@ function clearShoppingList() {
   if (!confirm('Clear the whole shopping list?')) return;
   state.shopping = []; save(); renderShoppingList();
 }
+/* ============================================================
+   Turning recipe ingredients into a shopping list
+
+   Recipes measure things the way you cook: "1/4 cup chopped onion",
+   "2/3 large carrot". Shops sell things whole. This section bridges the
+   two — merging the same ingredient across recipes, converting cooking
+   measures into countable items or shoppable weights, and not bothering
+   to quantify the things you buy by the jar.
+   ============================================================ */
+
 /* Turn an ingredient amount written by a human ("1 1/2", "½", "2-3", "0.75")
-   into a number we can add up. Returns null when there's nothing numeric,
-   which is the signal to fall back to listing the amounts verbatim. */
+   into a number we can add up. Returns null when there's nothing numeric. */
 function parseAmount(s) {
   if (s == null || s === '') return null;
   let t = String(s).trim().toLowerCase();
@@ -2191,8 +2202,7 @@ function parseAmount(s) {
     '⅛': ' 1/8', '⅜': ' 3/8', '⅝': ' 5/8', '⅞': ' 7/8'
   };
   for (const g in vulgar) t = t.split(g).join(vulgar[g]);
-  // A range like "2-3 cloves" is treated as the low end — better to under-buy
-  // by one clove than to fill the trolley with slack.
+  // A range like "2-3 cloves" is treated as the low end.
   t = t.replace(/(\d)\s*(?:-|–|to)\s*\d.*$/, '$1');
   t = t.trim();
 
@@ -2205,50 +2215,275 @@ function parseAmount(s) {
   return null;
 }
 
-/* Units that mean the same thing get folded together so "1 tbsp" and
-   "2 tablespoons" don't end up as two separate lines. */
+/* Units that mean the same thing get folded together. Size words ("large",
+   "medium") and vague ones ("piece", "whole") are treated as counting a whole
+   item — this is what stopped "2/3 large carrot" becoming "1 carrot". */
+const UNIT_ALIASES = {
+  tbsp: 'tbsp', tbs: 'tbsp', tablespoon: 'tbsp', tablespoons: 'tbsp', 'T': 'tbsp',
+  tsp: 'tsp', teaspoon: 'tsp', teaspoons: 'tsp',
+  g: 'g', gram: 'g', grams: 'g', gm: 'g', gr: 'g',
+  kg: 'kg', kilogram: 'kg', kilograms: 'kg',
+  ml: 'ml', milliliter: 'ml', milliliters: 'ml', millilitre: 'ml', millilitres: 'ml', cc: 'ml',
+  l: 'l', liter: 'l', liters: 'l', litre: 'l', litres: 'l',
+  oz: 'oz', ounce: 'oz', ounces: 'oz',
+  'fl oz': 'floz', floz: 'floz', 'fluid ounce': 'floz', 'fluid ounces': 'floz',
+  lb: 'lb', lbs: 'lb', pound: 'lb', pounds: 'lb',
+  cup: 'cup', cups: 'cup', c: 'cup',
+  pint: 'pint', pints: 'pint', pt: 'pint',
+  quart: 'quart', quarts: 'quart', qt: 'quart',
+  clove: 'clove', cloves: 'clove',
+  can: 'can', cans: 'can', tin: 'can', tins: 'can',
+  slice: 'slice', slices: 'slice',
+  stalk: 'stalk', stalks: 'stalk', rib: 'stalk', ribs: 'stalk',
+  head: 'head', heads: 'head',
+  bunch: 'bunch', bunches: 'bunch',
+  sprig: 'sprig', sprigs: 'sprig',
+  fillet: 'fillet', fillets: 'fillet',
+  // Size and vagueness — all just mean "one of them".
+  large: '', medium: '', small: '', extra: '', 'x-large': '',
+  piece: '', pieces: '', whole: '', each: '', unit: '', units: '',
+  serving: '', servings: '', package: '', packages: '', pkg: '',
+  container: '', containers: '', bottle: '', bottles: '', jar: '', jars: '',
+  box: '', boxes: '', bag: '', bags: '',
+};
 function normalizeUnit(u) {
   const t = String(u || '').trim().toLowerCase().replace(/\.$/, '');
-  const map = {
-    tbsp: 'tbsp', tbs: 'tbsp', tablespoon: 'tbsp', tablespoons: 'tbsp',
-    tsp: 'tsp', teaspoon: 'tsp', teaspoons: 'tsp',
-    g: 'g', gram: 'g', grams: 'g', gm: 'g',
-    kg: 'kg', kilogram: 'kg', kilograms: 'kg',
-    ml: 'ml', milliliter: 'ml', milliliters: 'ml', millilitre: 'ml', millilitres: 'ml',
-    l: 'l', liter: 'l', liters: 'l', litre: 'l', litres: 'l',
-    oz: 'oz', ounce: 'oz', ounces: 'oz',
-    lb: 'lb', lbs: 'lb', pound: 'lb', pounds: 'lb',
-    cup: 'cup', cups: 'cup',
-    clove: 'clove', cloves: 'clove',
-    can: 'can', cans: 'can', tin: 'can', tins: 'can',
-    slice: 'slice', slices: 'slice',
-    pinch: 'pinch', pinches: 'pinch',
-  };
-  return map[t] || t;
+  if (!t) return '';
+  if (Object.prototype.hasOwnProperty.call(UNIT_ALIASES, t)) return UNIT_ALIASES[t];
+  return t;
 }
 
-/* Scaling a recipe down to portions produces numbers like 166.667. That's
-   arithmetically right and useless in a shop, so round each unit the way you'd
-   actually buy it — always upward, since running short is the worse mistake. */
-function formatQty(n, unit) {
+const MASS_IN_G   = { g: 1, kg: 1000, oz: 28.35, lb: 453.6 };
+const VOL_IN_ML   = { ml: 1, l: 1000, cup: 240, tbsp: 15, tsp: 5, floz: 30, pint: 473, quart: 946 };
+// Units that already count whole objects.
+const COUNT_UNITS = ['', 'clove', 'can', 'slice', 'stalk', 'head', 'bunch', 'sprig', 'fillet'];
+
+/* Prep instructions that describe what you do to an ingredient after buying
+   it. Stripping them is what merges "chopped onions", "onion, diced" and
+   "1 large onion" into one line. Deliberately conservative — words that change
+   what you'd actually buy (ground, dried, fresh, smoked, canned) are kept. */
+const PREP_WORDS = ['chopped', 'finely chopped', 'roughly chopped', 'coarsely chopped',
+  'diced', 'minced', 'sliced', 'thinly sliced', 'thickly sliced', 'grated', 'shredded',
+  'crushed', 'cubed', 'julienned', 'peeled', 'halved', 'quartered', 'torn', 'trimmed',
+  'rinsed', 'drained', 'divided', 'melted', 'softened', 'beaten', 'packed',
+  'plus more', 'to taste', 'for garnish', 'for serving', 'optional'];
+
+function singularize(w) {
+  if (/(ss|us|is)$/.test(w)) return w;
+  if (/ies$/.test(w)) return w.slice(0, -3) + 'y';
+  if (/(oes|ches|shes|xes|sses)$/.test(w)) return w.slice(0, -2);
+  if (/s$/.test(w)) return w.slice(0, -1);
+  return w;
+}
+
+/* Strip the prep instructions off a name, leaving what you'd actually buy.
+   "1/4 cup chopped onions" -> "onions". Keeps the plural, because this is
+   the wording shown on the list. */
+function displayIngredient(name) {
+  let t = String(name || '').toLowerCase();
+  t = t.split('(')[0];                       // drop parenthetical asides
+  t = t.replace(/\s+or\s+.*$/, '');          // "butter or margarine" -> "butter"
+  // Prep words can appear before or after the name, comma-separated or not.
+  for (const w of PREP_WORDS) {
+    t = t.replace(new RegExp(`(^|[\\s,])${w}([\\s,]|$)`, 'g'), ' ');
+  }
+  t = t.replace(/[,;].*$/, '');               // anything after a comma is an aside
+  t = t.replace(/[^a-z\s-]/g, ' ').replace(/\s+/g, ' ').trim();
+  return t || String(name || '').toLowerCase().trim();
+}
+
+/* Reduce further to something two recipes will agree on, so "chopped onions",
+   "onion, diced" and "1 large onion" all land on the same line. */
+function canonicalIngredient(name) {
+  const t = displayIngredient(name);
+  if (!t) return '';
+  // Singularise only the final word: "green beans" -> "green bean".
+  const parts = t.split(' ');
+  parts[parts.length - 1] = singularize(parts[parts.length - 1]);
+  return parts.join(' ');
+}
+
+/* Things you buy as whole objects, with roughly how much one of them yields.
+   Lets "1/4 cup chopped onion" and "1 large onion" add up to "2 onions".
+   Weights are for a typical medium one; close enough for a shopping list. */
+const COUNT_ITEMS = {
+  'onion':          { g: 150, cup: 1 },
+  'red onion':      { g: 150, cup: 1 },
+  'yellow onion':   { g: 150, cup: 1 },
+  'white onion':    { g: 150, cup: 1 },
+  'shallot':        { g: 40,  cup: 0.25 },
+  'spring onion':   { g: 15,  cup: 0.12 },
+  'scallion':       { g: 15,  cup: 0.12 },
+  'green onion':    { g: 15,  cup: 0.12 },
+  'leek':           { g: 150, cup: 1 },
+  'carrot':         { g: 60,  cup: 0.5 },
+  'celery':         { g: 40,  cup: 0.5 },
+  'potato':         { g: 170, cup: 1 },
+  'sweet potato':   { g: 200, cup: 1.3 },
+  'tomato':         { g: 120, cup: 0.75 },
+  'bell pepper':    { g: 120, cup: 1 },
+  'red pepper':     { g: 120, cup: 1 },
+  'green pepper':   { g: 120, cup: 1 },
+  'yellow pepper':  { g: 120, cup: 1 },
+  'jalapeno':       { g: 15,  tbsp: 1 },
+  'chili pepper':   { g: 15,  tbsp: 1 },
+  'cucumber':       { g: 300, cup: 2 },
+  'zucchini':       { g: 200, cup: 1.3 },
+  'courgette':      { g: 200, cup: 1.3 },
+  'eggplant':       { g: 450, cup: 3 },
+  'aubergine':      { g: 450, cup: 3 },
+  'avocado':        { g: 200, cup: 1 },
+  'apple':          { g: 180, cup: 1 },
+  'banana':         { g: 120, cup: 0.6 },
+  'lemon':          { g: 100, tbsp: 3 },
+  'lime':           { g: 70,  tbsp: 2 },
+  'orange':         { g: 150, cup: 0.3 },
+  'egg':            { g: 50 },
+  'garlic':         { g: 3,   tsp: 1,  unit: 'clove' },
+  'chicken breast': { g: 170 },
+  'chicken thigh':  { g: 110 },
+  'corn':           { g: 90,  cup: 0.6 },
+  'broccoli':       { g: 500, cup: 4,  unit: 'head' },
+  'cauliflower':    { g: 600, cup: 5,  unit: 'head' },
+  'lettuce':        { g: 300, cup: 5,  unit: 'head' },
+  'tortilla':       { g: 40 },
+  'bay leaf':       { g: 0.2 },
+};
+
+/* Bought as a jar, bottle or box that lasts months. Listing "3 tsp smoked
+   paprika" is noise — you just want reminding to check you have it. */
+const STAPLE_PATTERNS = [
+  /^salt$/, /salt and pepper/, /^pepper$/, /black pepper/, /white pepper/,
+  /^water$/, /^ice$/,
+  /oil$/, /^oil/, /vinegar/, /cooking spray/,
+  /soy sauce/, /worcestershire/, /fish sauce/, /hot sauce/, /^honey$/,
+  /baking powder/, /baking soda/, /vanilla extract/, /cornstarch/, /corn starch/,
+];
+
+/* Decide how an ingredient should appear on the list. */
+function shoppingRule(key, aisle) {
+  for (const re of STAPLE_PATTERNS) if (re.test(key)) return { buy: 'staple' };
+  // Everything in the spice rack behaves the same way, so no table needed.
+  if (aisle === 'Herbs & Spices') return { buy: 'staple' };
+  if (COUNT_ITEMS[key]) return { buy: 'count', per: COUNT_ITEMS[key] };
+  // Sold by weight even though recipes measure it by the cup.
+  const last = key.split(' ').slice(-2).join(' ');
+  const gPerCup = G_PER_CUP[key] || G_PER_CUP[last] || G_PER_CUP[key.split(' ').pop()];
+  return gPerCup ? { buy: 'auto', gPerCup } : { buy: 'auto' };
+}
+
+/* Add one recipe line into a running total for an ingredient. */
+function addToTally(tally, qty, unit, rule) {
   const u = normalizeUnit(unit);
-  const eps = 0.001;
-  // Things you buy as whole objects. Two-thirds of an onion is one onion.
-  const countable = ['', 'clove', 'can', 'slice', 'head', 'bunch', 'packet',
-    'pack', 'egg', 'sprig', 'stick', 'fillet', 'rasher', 'sheet', 'jar', 'bag'];
-  if (countable.includes(u)) return String(Math.max(1, Math.ceil(n - eps)));
-  if (u === 'g' || u === 'ml') {
-    const step = n < 100 ? 5 : 10;
-    return String(Math.max(step, Math.ceil((n - eps) / step) * step));
+
+  if (rule.buy === 'count') {
+    const per = rule.per;
+    if (COUNT_UNITS.includes(u)) { tally.count += qty; return; }
+    if (MASS_IN_G[u] && per.g)   { tally.count += (qty * MASS_IN_G[u]) / per.g; return; }
+    if (VOL_IN_ML[u]) {
+      // Work out how many ml one whole item yields from whichever
+      // volume equivalence the table gives.
+      const mlPerItem = per.cup ? per.cup * 240
+                      : per.tbsp ? per.tbsp * 15
+                      : per.tsp ? per.tsp * 5 : null;
+      if (mlPerItem) { tally.count += (qty * VOL_IN_ML[u]) / mlPerItem; return; }
+      if (per.g) { tally.count += (qty * VOL_IN_ML[u]) / per.g; return; }   // rough: 1ml ≈ 1g
+    }
+    tally.count += qty;   // unknown unit — assume it meant one of them
+    return;
   }
-  // Spoon and cup measures read naturally as quarters.
-  if (u === 'cup' || u === 'tbsp' || u === 'tsp') {
-    return decimalToFraction(Math.ceil((n - eps) * 4) / 4);
+
+  if (MASS_IN_G[u]) { tally.g += qty * MASS_IN_G[u]; return; }
+  if (VOL_IN_ML[u]) {
+    // Weigh it if we know what a cup of it weighs — that's how it's sold.
+    if (rule.gPerCup) { tally.g += (qty * VOL_IN_ML[u] / 240) * rule.gPerCup; return; }
+    tally.ml += qty * VOL_IN_ML[u];
+    return;
   }
-  if (u === 'kg' || u === 'l' || u === 'lb' || u === 'oz') {
-    return String(Math.ceil((n - eps) * 20) / 20);
+  if (COUNT_UNITS.includes(u)) {
+    tally.count += qty;
+    if (u) tally.countUnit = u;
+    return;
   }
-  return decimalToFraction(n);
+  // A unit we've never seen — keep it verbatim rather than guess.
+  const k = u || '';
+  tally.other.set(k, (tally.other.get(k) || 0) + qty);
+}
+
+/* Round to something you could actually pick off a shelf. */
+function roundMass(g) {
+  if (g >= 1000) return `${(Math.ceil(g / 50) * 50 / 1000).toFixed(2).replace(/\.?0+$/, '')} kg`;
+  if (g >= 100)  return `${Math.ceil(g / 10) * 10} g`;
+  return `${Math.max(5, Math.ceil(g / 5) * 5)} g`;
+}
+function roundVolume(ml) {
+  if (ml >= 1000) return `${(Math.ceil(ml / 50) * 50 / 1000).toFixed(2).replace(/\.?0+$/, '')} L`;
+  if (ml >= 250)  return `${Math.ceil(ml / 50) * 50} ml`;
+  if (ml >= 50)   return `${Math.ceil(ml / 10) * 10} ml`;
+  // Small volumes read better as spoons.
+  if (ml >= 15)   return `${decimalToFraction(Math.ceil(ml / 15 * 2) / 2)} tbsp`;
+  return `${decimalToFraction(Math.ceil(ml / 5 * 2) / 2)} tsp`;
+}
+// Foods whose plural takes -oes. "Avocados" and "burritos" don't, so this is a
+// list rather than a rule about vowels.
+const OES_PLURALS = ['tomato', 'potato', 'mango', 'hero'];
+function pluralize(word, n) {
+  if (n <= 1) return word;
+  const last = word.split(' ').pop();
+  if (OES_PLURALS.includes(last)) return word + 'es';
+  if (/(s|x|ch|sh)$/.test(word)) return word + 'es';
+  if (/[^aeiou]y$/.test(word)) return word.slice(0, -1) + 'ies';
+  return word + 's';
+}
+
+/* Dry and thick ingredients are measured in cups when cooking but sold by
+   weight. Roughly how much a cup of each weighs, so "1 1/3 cups red lentils"
+   comes out as grams instead of a meaningless volume. */
+const G_PER_CUP = {
+  'rice': 185, 'white rice': 185, 'brown rice': 190, 'arborio rice': 200,
+  'lentil': 200, 'red lentil': 200, 'green lentil': 200,
+  'flour': 125, 'all purpose flour': 125, 'plain flour': 125, 'bread flour': 130,
+  'sugar': 200, 'brown sugar': 220, 'caster sugar': 200, 'powdered sugar': 120,
+  'oat': 90, 'rolled oat': 90, 'porridge oat': 90,
+  'quinoa': 170, 'couscous': 175, 'barley': 200, 'pearl barley': 200,
+  'bulgur': 140, 'polenta': 160, 'cornmeal': 160,
+  'pasta': 100, 'macaroni': 100, 'breadcrumb': 110, 'panko': 60,
+  'almond': 140, 'walnut': 100, 'cashew': 130, 'pecan': 100, 'peanut': 145,
+  'raisin': 165, 'chocolate chip': 175, 'coconut': 80,
+  'cheese': 110, 'grated cheese': 100, 'parmesan': 100, 'cheddar': 115,
+  'butter': 227, 'peanut butter': 250, 'yogurt': 245, 'sour cream': 240,
+  'chickpea': 165, 'black bean': 175, 'kidney bean': 180,
+};
+
+/* Turn a finished tally into the line you'll read in the shop.
+   `key` is the singular grouping name ("onion"); `display` is the wording as
+   the recipes had it ("onions", "black beans"). */
+function formatShoppingLine(key, display, tally, rule) {
+  if (rule.buy === 'staple') {
+    // Capitalised and unquantified: a nudge to check the cupboard.
+    return display.charAt(0).toUpperCase() + display.slice(1);
+  }
+
+  const parts = [];
+  if (rule.buy === 'count' || (tally.count > 0 && !tally.g && !tally.ml && !tally.other.size)) {
+    const n = Math.max(1, Math.ceil(tally.count - 0.001));
+    // "3 cloves garlic", "2 cans black beans" — the container gets counted and
+    // the ingredient keeps whatever wording the recipes used.
+    const unitWord = (rule.per && rule.per.unit) || tally.countUnit;
+    if (unitWord) return `${n} ${pluralize(unitWord, n)} ${display}`;
+    // "2 onions" — count the thing itself, so pluralise from the singular.
+    return `${n} ${pluralize(key, n)}`;
+  }
+  if (tally.g)  parts.push(roundMass(tally.g));
+  if (tally.ml) parts.push(roundVolume(tally.ml));
+  if (tally.count > 0) {
+    const n = Math.ceil(tally.count - 0.001);
+    parts.push(tally.countUnit ? `${n} ${pluralize(tally.countUnit, n)}` : `${n}`);
+  }
+  for (const [u, n] of tally.other) {
+    parts.push([decimalToFraction(n), u].filter(Boolean).join(' ').trim());
+  }
+  return parts.length ? `${parts.join(' + ')} ${display}` : display;
 }
 
 function rebuildShoppingList() {
@@ -2256,9 +2491,8 @@ function rebuildShoppingList() {
   const start = new Date(state.currentWeekStart);
   const slots = ['breakfast', 'lunch', 'dinner'];
 
-  // Collect cook events, not recipes. A recipe cooked twice in a week needs
-  // buying twice; a leftover night needs buying zero times, because the
-  // ingredients were already bought for the night it was actually cooked.
+  // Collect cook events, not recipes. A recipe cooked twice needs buying
+  // twice; a leftover night needs buying zero times.
   const cookEvents = [];
   for (let i = 0; i < 7; i++) {
     const d = new Date(start); d.setDate(start.getDate() + i);
@@ -2268,61 +2502,61 @@ function rebuildShoppingList() {
       if (!entry || entry.leftover) continue;
       const r = state.recipes.find(x => x.id === entry.id);
       if (!r) continue;
-      // Scale to how many portions the plan wants out of this cook.
       const base = Number(r.servings) || 0;
       const want = Number(entry.servings) || 0;
-      const scale = (base > 0 && want > 0) ? want / base : 1;
-      cookEvents.push({ recipe: r, scale });
+      cookEvents.push({ recipe: r, scale: (base > 0 && want > 0) ? want / base : 1 });
     }
   }
 
-  const map = new Map(); // ingredient name -> { name, units: Map, loose: [] }
+  const map = new Map();
   for (const ev of cookEvents) {
     for (const ing of (ev.recipe.ingredients || [])) {
       if (!ing || !ing.name) continue;
-      const key = ing.name.trim().toLowerCase();
-      if (!map.has(key)) map.set(key, { name: ing.name.trim(), units: new Map(), loose: [], aisle: '' });
-      const bucket = map.get(key);
-      // The first recipe that knows the aisle wins; hand-typed recipes won't.
-      if (!bucket.aisle && ing.aisle) bucket.aisle = ing.aisle;
-      const qty = parseAmount(ing.amount);
-      if (qty == null) {
-        // "to taste", "a handful" — nothing to add up, so keep the words.
-        const words = [ing.amount, ing.unit].filter(Boolean).join(' ').trim();
-        if (words && !bucket.loose.includes(words)) bucket.loose.push(words);
-      } else {
-        const u = normalizeUnit(ing.unit);
-        bucket.units.set(u, (bucket.units.get(u) || 0) + qty * ev.scale);
+      // Spoonacular hands us a clean name; anything else gets canonicalised.
+      const key = canonicalIngredient(ing.key || ing.name);
+      if (!key || key === 'water' || key === 'ice') continue;
+      if (!map.has(key)) {
+        map.set(key, {
+          key,
+          display: displayIngredient(ing.key || ing.name) || key,
+          aisle: ing.aisle || '',
+          tally: { g: 0, ml: 0, count: 0, countUnit: '', other: new Map() },
+        });
       }
+      const bucket = map.get(key);
+      if (!bucket.aisle && ing.aisle) bucket.aisle = ing.aisle;
+
+      const rule = shoppingRule(key, bucket.aisle);
+      if (rule.buy === 'staple') continue;          // no quantity needed
+      const qty = parseAmount(ing.amount);
+      if (qty == null) continue;                    // "to taste" and friends
+      addToTally(bucket.tally, qty * ev.scale, ing.unit, rule);
     }
   }
 
   state.shopping = [...map.values()].map(v => {
-    const parts = [...v.units.entries()]
-      .map(([u, n]) => [formatQty(n, u), u].filter(Boolean).join(' ').trim())
-      .concat(v.loose);
-    const out = {
-      item: parts.length ? `${parts.join(' + ')} ${v.name}` : v.name,
-      checked: false,
-    };
+    const rule = shoppingRule(v.key, v.aisle);
+    const out = { item: formatShoppingLine(v.key, v.display, v.tally, rule), checked: false };
     if (v.aisle) out.category = v.aisle;
     return out;
   });
-  // Group the shop the way you'd walk it, not the order recipes happened to
-  // mention things.
+
+  // Group the shop the way you'd walk it.
   const AISLE_ORDER = ['Produce', 'Meat & Fish', 'Dairy & Eggs', 'Bakery',
     'Pantry', 'Herbs & Spices', 'Frozen', 'Drinks', 'Other'];
   const rank = c => {
     const i = AISLE_ORDER.indexOf(c || 'Other');
     return i === -1 ? AISLE_ORDER.length : i;
   };
-  state.shopping.sort((a, b) => rank(a.category) - rank(b.category));
+  state.shopping.sort((a, b) => rank(a.category) - rank(b.category)
+    || a.item.localeCompare(b.item));
 
   if (state.shopping.length === 0) {
     alert('You haven\'t planned any meals this week yet. Head to Meal Plan and add some first.');
   }
   save(); renderShoppingList();
 }
+
 function copyShoppingList() {
   const line = i => (i.checked ? '✓ ' : '• ') + i.item;
   let text;
@@ -2355,6 +2589,60 @@ function addShoppingItem() {
   renderShoppingList();
   // Refocus so users can keep adding items rapidly
   setTimeout(() => document.getElementById('shoppingAddInput').focus(), 0);
+}
+
+/* Repair recipes saved before the instruction handling was fixed: break up
+   walls of text, and re-fetch anything that came in with its method missing. */
+async function repairInstructions() {
+  const splitFixed = [];
+  for (const r of state.recipes) {
+    const cur = r.instructions || [];
+    if (cur.length === 1 && String(cur[0]).length > 260) {
+      const split = paragraphToSteps(cur[0]);
+      if (split.length > 1) { r.instructions = split; splitFixed.push(r.title); }
+    }
+  }
+
+  // Anything still unusable that we know the Spoonacular id for can be
+  // fetched again properly.
+  const refetchable = state.recipes.filter(r => r.spoonId && stepsLookThin(r.instructions));
+  let refetched = 0;
+
+  if (refetchable.length && spoonKey()) {
+    const ok = confirm(
+      `${refetchable.length} recipe${refetchable.length === 1 ? '' : 's'} still ` +
+      `${refetchable.length === 1 ? 'has' : 'have'} missing or incomplete steps.\n\n` +
+      `Fetch the full versions from Spoonacular? This uses about ${refetchable.length} ` +
+      `of your daily quota (150 a day on the free plan).`
+    );
+    if (ok) {
+      try {
+        // Chunked so the URL stays a sensible length.
+        for (let i = 0; i < refetchable.length; i += 20) {
+          const chunk = refetchable.slice(i, i + 20);
+          const full = await fetchFullRecipes(chunk.map(r => r.spoonId));
+          for (const r of chunk) {
+            const raw = full.get(r.spoonId);
+            if (!raw) continue;
+            const steps = spoonSteps(raw);
+            if (steps.length && !stepsLookThin(steps)) { r.instructions = steps; refetched++; }
+          }
+        }
+      } catch (e) {
+        alert('Couldn\'t reach Spoonacular: ' + (e.message || e));
+      }
+    }
+  }
+
+  save();
+  renderRecipes();
+
+  const bits = [];
+  if (splitFixed.length) bits.push(`${splitFixed.length} broken into readable steps`);
+  if (refetched) bits.push(`${refetched} re-fetched in full`);
+  const stuck = state.recipes.filter(r => stepsUnusable(r.instructions)).length;
+  if (stuck) bits.push(`${stuck} still without usable steps — those need editing by hand, or re-importing from the original link`);
+  alert(bits.length ? 'Done:\n\n• ' + bits.join('\n• ') : 'Nothing needed fixing — all your recipes have usable steps.');
 }
 
 function resetAllData() {
@@ -3072,18 +3360,125 @@ function htmlToSteps(html) {
 // structure (Foodista's grouping survives in r.instructions). Only fall back to
 // Spoonacular's analyzed steps -- which often over-segment into many tiny pieces
 // -- when the source instructions don't yield multiple discrete steps.
-function spoonSteps(r) {
-  const fromHtml = r.instructions ? htmlToSteps(r.instructions) : [];
-  if (fromHtml.length >= 2) return fromHtml;
-  const fromAnalyzed = [];
-  if (r.analyzedInstructions && r.analyzedInstructions.length) {
-    r.analyzedInstructions.forEach(b => (b.steps || []).forEach(s => {
-      const t = tidySpacing(s.step || '');
-      if (t) fromAnalyzed.push(t);
-    }));
+/* Measure a step list so two versions of the same recipe can be compared.
+   `chars` is the one that matters most: a version with far less text than
+   another is missing content, however tidily it's broken up. */
+function stepsQuality(steps) {
+  const clean = (steps || [])
+    .map(s => tidySpacing(s))
+    .filter(s => s && s.length > 2 && !/^(ingredients?|instructions?|directions?|advertisement)$/i.test(s));
+  return {
+    steps: clean,
+    count: clean.length,
+    chars: clean.join(' ').length,
+    longest: clean.reduce((m, s) => Math.max(m, s.length), 0),
+  };
+}
+
+/* Given several versions of the same instructions, pick the one to keep.
+   Completeness first, then structure — a truncated eight-step list is worse
+   than a complete two-step one, but between two complete versions the one
+   with more steps is easier to cook from. */
+function pickBestSteps(candidates) {
+  const scored = (candidates || []).map(stepsQuality).filter(q => q.count > 0);
+  if (!scored.length) return [];
+  const maxChars = Math.max(...scored.map(q => q.chars));
+  const complete = scored.filter(q => q.chars >= maxChars * 0.8);
+  complete.sort((a, b) => b.count - a.count || b.chars - a.chars);
+  return complete[0].steps;
+}
+
+/* One unbroken wall of text is useless at the hob. Break it into steps you can
+   actually follow and tick off. */
+function paragraphToSteps(text) {
+  const t = tidySpacing(text);
+  if (t.length < 260) return [t];
+
+  // "1. Do this 2. Do that" hiding inside the paragraph.
+  const numbered = splitNumbered(t);
+  if (numbered.length > 1) return numbered.map(stripStepPrefix).filter(Boolean);
+
+  // Otherwise fall back to sentences, grouped so each step is a sensible size.
+  // Split keeps the punctuation so sentences stay readable.
+  const parts = t.split(/([.!?])\s+/);
+  const sentences = [];
+  for (let i = 0; i < parts.length; i += 2) {
+    const s = ((parts[i] || '') + (parts[i + 1] || '')).trim();
+    if (s) sentences.push(s);
   }
-  if (fromAnalyzed.length) return fromAnalyzed;
-  return fromHtml;
+  if (sentences.length < 2) return [t];
+
+  // One instruction per step reads best at the hob, so each sentence starts a
+  // new step — unless what we have so far is too short to stand on its own
+  // ("Preheat the oven."), in which case it joins the next one.
+  const steps = [];
+  let cur = '';
+  for (const s of sentences) {
+    if (cur && cur.length >= 45) { steps.push(cur); cur = s; }
+    else cur = cur ? cur + ' ' + s : s;
+  }
+  if (cur) {
+    if (steps.length && cur.length < 40) steps[steps.length - 1] += ' ' + cur;
+    else steps.push(cur);
+  }
+  return steps.length > 1 ? steps : [t];
+}
+
+/* Is this step list too thin to cook from? Used to decide whether it's worth
+   spending a request fetching the fuller version. */
+function stepsLookThin(steps) {
+  const q = stepsQuality(steps);
+  return q.count < 2 || q.chars < 200;
+}
+
+/* Stricter: genuinely can't be cooked from. A short-but-complete three-step
+   method is thin enough to be worth re-fetching, but it isn't broken, so it
+   shouldn't be reported to the user as a problem. */
+function stepsUnusable(steps) {
+  const q = stepsQuality(steps);
+  return q.count === 0 || (q.count === 1 && q.chars < 260);
+}
+
+function spoonSteps(r) {
+  const candidates = [];
+
+  // Spoonacular's own parsed steps. Usually the best-structured version.
+  if (r.analyzedInstructions && r.analyzedInstructions.length) {
+    const named = r.analyzedInstructions.filter(b => b && b.name).length > 1;
+    const out = [];
+    for (const b of r.analyzedInstructions) {
+      // Multi-part recipes ("For the sauce", "To assemble") lose their shape
+      // without these headings.
+      if (named && b.name) {
+        const n = tidySpacing(b.name);
+        if (n) out.push(/[:.]$/.test(n) ? n : n + ':');
+      }
+      for (const s of (b.steps || [])) {
+        const t = tidySpacing(s.step || '');
+        if (t) out.push(t);
+      }
+    }
+    candidates.push(out);
+  }
+
+  // The raw instructions blob, which sometimes has the author's own grouping.
+  if (r.instructions) candidates.push(htmlToSteps(r.instructions));
+
+  let best = pickBestSteps(candidates);
+  if (best.length === 1) best = paragraphToSteps(best[0]);
+  return best.map(stripStepPrefix).filter(Boolean);
+}
+
+/* Should the original site's steps replace Spoonacular's? Only when they're
+   genuinely better — the old code took anything with two or more steps, which
+   is how a good ten-step method got replaced by two lines of page furniture. */
+function preferSourceSteps(current, incoming) {
+  if (!incoming || incoming.length < 2) return false;
+  const a = stepsQuality(current);
+  const b = stepsQuality(incoming);
+  if (!a.count) return true;
+  if (b.chars < a.chars * 0.8) return false;      // the site's version is missing content
+  return b.count > a.count || a.longest > 400;    // more structure, or ours is a wall of text
 }
 
 // Spoonacular summaries are mostly auto-generated stats and marketing
@@ -3249,9 +3644,13 @@ function convertSpoonacularRecipe(r) {
     ingredients: (r.extendedIngredients || []).map(i => ({
       amount: decimalToFraction(i.amount),
       unit: i.unit || '',
+      // What the recipe page shows — "chopped onions", as the cook wrote it.
       name: i.originalName || i.name || '',
-      // Spoonacular tells us which part of the shop each ingredient lives in.
-      // Carried through so the shopping list can group itself.
+      // What the shopping list groups on. Spoonacular normalises this for us
+      // ("onion"), which is how the same thing across three recipes ends up
+      // on one line instead of three.
+      key: i.nameClean || i.name || '',
+      // Which part of the shop it lives in.
       aisle: tidyAisle(i.aisle),
     })),
     instructions: spoonSteps(r),
@@ -3259,6 +3658,18 @@ function convertSpoonacularRecipe(r) {
     sourceUrl: r.sourceUrl || '',
     favorite: false,
   };
+}
+
+/* Full records for several recipes in a single request. Used when a search
+   result's instructions look too thin to cook from. */
+async function fetchFullRecipes(ids) {
+  const key = spoonKey();
+  if (!key || !ids || !ids.length) return new Map();
+  const url = `https://api.spoonacular.com/recipes/informationBulk?ids=${ids.join(',')}&apiKey=${key}`;
+  const resp = await fetch(url);
+  if (!resp.ok) return new Map();
+  const arr = await resp.json();
+  return new Map((Array.isArray(arr) ? arr : []).map(r => [r.id, r]));
 }
 
 async function fetchSpoonacularRecipe(spoonId) {
@@ -3272,7 +3683,7 @@ async function fetchSpoonacularRecipe(spoonId) {
   // from the site's own recipe markup (same pipeline as the URL importer).
   try {
     const srcSteps = await fetchSourceInstructions(recipe.sourceUrl);
-    if (srcSteps && srcSteps.length >= 2) recipe.instructions = srcSteps;
+    if (preferSourceSteps(recipe.instructions, srcSteps)) recipe.instructions = srcSteps;
   } catch (e) { /* keep Spoonacular's steps */ }
   return recipe;
 }
@@ -4183,13 +4594,23 @@ async function applyAIPlan() {
     toSave.push(cand);
   }
 
-  // Spoonacular re-segments instructions; where we can reach the original
-  // site, its own step grouping reads better. Best-effort and parallel.
+  // Search results carry a trimmed version of each recipe, and for some
+  // recipes the instructions come back thin or empty. Fetch the full record
+  // for just those — one request covers all of them.
+  const thin = toSave.filter(c => stepsLookThin(spoonSteps(c.raw))).map(c => c.id);
+  let full = new Map();
+  if (thin.length) {
+    try { full = await fetchFullRecipes(thin); }
+    catch (e) { /* carry on with what the search gave us */ }
+  }
+
+  // Where we can reach the original site, its own step grouping often reads
+  // better than Spoonacular's re-segmentation. Best-effort and parallel.
   const converted = await Promise.all(toSave.map(async cand => {
-    const recipe = convertSpoonacularRecipe(cand.raw);
+    const recipe = convertSpoonacularRecipe(full.get(cand.id) || cand.raw);
     try {
       const srcSteps = await fetchSourceInstructions(recipe.sourceUrl);
-      if (srcSteps && srcSteps.length >= 2) recipe.instructions = srcSteps;
+      if (preferSourceSteps(recipe.instructions, srcSteps)) recipe.instructions = srcSteps;
     } catch (e) { /* keep Spoonacular's steps */ }
     return { cand, recipe };
   }));

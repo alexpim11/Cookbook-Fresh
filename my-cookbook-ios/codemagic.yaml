@@ -128,6 +128,36 @@ workflows:
             --verbose
           keychain add-certificates
           xcode-project use-profiles
+      - name: Report what the provisioning profile actually allows
+        script: |
+          # Decodes the profiles Codemagic just fetched and says plainly whether
+          # Sign In with Apple is in them. Distinguishes "capability missing from
+          # the App ID" from "stale profile that predates enabling it".
+          DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          if [ ! -d "$DIR" ]; then echo "No profiles directory - nothing was fetched."; exit 0; fi
+          FOUND=0
+          for p in "$DIR"/*.mobileprovision; do
+            [ -e "$p" ] || continue
+            FOUND=1
+            security cms -D -i "$p" > /tmp/pp.plist 2>/dev/null || continue
+            NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' /tmp/pp.plist 2>/dev/null)
+            APPID=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' /tmp/pp.plist 2>/dev/null)
+            EXPIRY=$(/usr/libexec/PlistBuddy -c 'Print :ExpirationDate' /tmp/pp.plist 2>/dev/null)
+            echo "=============================================="
+            echo "Profile : $NAME"
+            echo "App ID  : $APPID"
+            echo "Expires : $EXPIRY"
+            if /usr/libexec/PlistBuddy -c 'Print :Entitlements' /tmp/pp.plist 2>/dev/null | grep -qi applesignin; then
+              echo "RESULT  : Sign In with Apple IS in this profile."
+            else
+              echo "RESULT  : Sign In with Apple is MISSING from this profile."
+              echo "          Either the capability is not enabled on App ID"
+              echo "          $BUNDLE_ID at developer.apple.com, or this profile"
+              echo "          was generated before it was enabled and needs"
+              echo "          deleting at Apple so a fresh one is issued."
+            fi
+          done
+          [ "$FOUND" = "1" ] || echo "No .mobileprovision files were found."
       - name: Increment build number
         script: |
           cd ios/App
@@ -135,7 +165,20 @@ workflows:
           agvtool new-version -all $(($LATEST_BUILD_NUMBER + 1))
       - name: Add Sign in with Apple entitlement
         script: |
-          cat > ios/App/App/App.entitlements <<'PLIST'
+          # Set ENABLE_APPLE_SIGNIN=false as a Codemagic variable to ship a build
+          # without this entitlement - useful to get unblocked while the App ID
+          # capability is being sorted out at developer.apple.com. Leave it unset
+          # for normal builds. Note that dropping it disables Apple sign-in in
+          # the shipped app, so don't use it for a release if anyone already
+          # signs in that way.
+          if [ "$ENABLE_APPLE_SIGNIN" = "false" ]; then
+            echo "ENABLE_APPLE_SIGNIN=false - building WITHOUT Sign in with Apple."
+            rm -f ios/App/App/App.entitlements
+            printf '%s' '<?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict/></plist>' > ios/App/App/App.entitlements
+          else
+            cat > ios/App/App/App.entitlements <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -145,6 +188,7 @@ workflows:
           </dict>
           </plist>
           PLIST
+          fi
       - name: Declare no non-exempt encryption (skips compliance question)
         script: |
           plutil -replace ITSAppUsesNonExemptEncryption -bool NO ios/App/App/Info.plist
