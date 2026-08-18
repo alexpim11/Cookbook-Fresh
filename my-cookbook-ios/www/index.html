@@ -562,6 +562,30 @@
   }
   .shop-group-head:first-child { margin-top: 0; }
 
+  /* ---------- Pantry ---------- */
+  .pantry-list { background: var(--surface); border-radius: 18px;
+    border: 1px solid var(--border); padding: 20px; max-width: 700px; }
+  .pantry-list ul { list-style: none; padding: 0; margin: 0; }
+  .pantry-item {
+    padding: 10px 0; border-bottom: 1px dashed var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .pantry-item:last-child { border-bottom: none; }
+  .pantry-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .pantry-name small { display: block; color: var(--ink-soft); font-size: 11.5px; margin-top: 2px; }
+  .pantry-item.low { background: rgba(192, 83, 47, 0.05); }
+  .pantry-item.low .pantry-name { color: var(--accent); }
+  .pantry-flag {
+    background: none; border: 1px solid var(--border); border-radius: 999px;
+    padding: 3px 10px; font-size: 11px; font-weight: 600; cursor: pointer;
+    color: var(--ink-soft); font-family: inherit; white-space: nowrap;
+  }
+  .pantry-flag:hover { border-color: var(--accent); color: var(--accent); }
+  .pantry-flag.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  .pantry-stats {
+    display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px;
+  }
+
   /* ---------- Shopping list ---------- */
   .shopping-add {
     display: flex; gap: 8px; max-width: 700px; margin-bottom: 16px;
@@ -734,6 +758,8 @@
       display: flex;
       position: fixed; left: 0; right: 0; bottom: 0;
       z-index: 100;
+      /* anchor for the raised centre button */
+      overflow: visible;
       background: var(--surface);
       border-top: 1px solid var(--border);
       padding: 6px 4px 8px;
@@ -756,6 +782,31 @@
     .bottom-nav-btn .nav-label {
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
       max-width: 100%;
+    }
+
+    /* The Recipes button sits in the middle as a raised circle, half over the
+       bar. The spacer keeps a hole in the flex row for it to sit in. */
+    .bottom-nav-spacer { flex: 1; min-width: 0; pointer-events: none; }
+    .bottom-nav-fab {
+      /* Raised so roughly a third of it sits above the bar's top edge. */
+      position: absolute; left: 50%; top: -22px; z-index: 2;
+      transform: translateX(-50%);
+      width: 62px; height: 62px; border-radius: 50%;
+      background: var(--accent); color: #fff;
+      border: 4px solid var(--bg);
+      box-shadow: 0 4px 14px rgba(192, 83, 47, 0.35);
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 1px; cursor: pointer; padding: 0;
+      font-family: inherit;
+      transition: transform 0.15s, box-shadow 0.15s;
+    }
+    .bottom-nav-fab:active { transform: translateX(-50%) scale(0.94); }
+    .bottom-nav-fab .nav-icon { font-size: 24px; line-height: 1; }
+    .bottom-nav-fab .nav-label {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.02em;
+    }
+    .bottom-nav-fab.active {
+      box-shadow: 0 0 0 3px var(--accent-soft), 0 4px 14px rgba(192, 83, 47, 0.45);
     }
   }
 
@@ -781,6 +832,7 @@
     <nav>
       <button class="nav-btn active" data-view="home" onclick="showView('home')">Home</button>
       <button class="nav-btn" data-view="recipes" onclick="showView('recipes')">Recipes</button>
+      <button class="nav-btn" data-view="pantry" onclick="showView('pantry')">Pantry</button>
       <button class="nav-btn" data-view="mealplan" onclick="showView('mealplan')">Meal Plan</button>
       <button class="nav-btn" data-view="shopping" onclick="showView('shopping')">Shopping List</button>
     </nav>
@@ -1056,12 +1108,31 @@
     <div id="mealDayList" class="meal-day-list"></div>
   </section>
 
+  <!-- ========== Pantry View ========== -->
+  <section id="view-pantry" class="view">
+    <h1>Pantry</h1>
+    <p class="subtitle">What you've already got in. Tick things off the shopping list and they land here.</p>
+    <div class="pantry-stats" id="pantryStats"></div>
+    <div class="toolbar">
+      <button class="btn-secondary btn-small" onclick="pullBoughtIntoPantry()">🛒 Add everything I've ticked off</button>
+      <button class="btn-secondary btn-small" onclick="clearRunningLow()">Clear the low flags</button>
+      <button class="btn-ghost" style="font-size:12px; margin-left:auto;" onclick="clearPantry()">Empty the pantry</button>
+    </div>
+    <div class="shopping-add">
+      <input type="text" id="pantryAddInput" placeholder="Add something you already have..."
+             onkeydown="if(event.key==='Enter')addPantryItem()" />
+      <button class="btn" onclick="addPantryItem()">+ Add</button>
+    </div>
+    <div id="pantryContent" class="pantry-list"></div>
+  </section>
+
   <!-- ========== Shopping List View ========== -->
   <section id="view-shopping" class="view">
     <h1>Shopping List</h1>
     <p class="subtitle">Everything you need to buy this week.</p>
     <div class="toolbar">
       <button class="btn-secondary btn-small" onclick="rebuildShoppingList()">↻ Rebuild from meal plan</button>
+      <button class="btn-secondary btn-small" onclick="pullBoughtIntoPantry()">🧺 Move ticked into pantry</button>
       <button class="btn-secondary btn-small" onclick="clearShoppingList()">Clear list</button>
       <button class="btn-secondary btn-small" onclick="copyShoppingList()">📋 Copy</button>
     </div>
@@ -1081,14 +1152,19 @@
   <button class="bottom-nav-btn active" data-view="home" onclick="showView('home')">
     <span class="nav-icon">🏠</span><span class="nav-label">Home</span>
   </button>
-  <button class="bottom-nav-btn" data-view="recipes" onclick="showView('recipes')">
-    <span class="nav-icon">🍳</span><span class="nav-label">Recipes</span>
+  <button class="bottom-nav-btn" data-view="pantry" onclick="showView('pantry')">
+    <span class="nav-icon">🧺</span><span class="nav-label">Pantry</span>
   </button>
+  <span class="bottom-nav-spacer"></span>
   <button class="bottom-nav-btn" data-view="mealplan" onclick="showView('mealplan')">
     <span class="nav-icon">📅</span><span class="nav-label">Plan</span>
   </button>
   <button class="bottom-nav-btn" data-view="shopping" onclick="showView('shopping')">
     <span class="nav-icon">🛒</span><span class="nav-label">Shop</span>
+  </button>
+  <!-- Raised centre button, half overlapping the bar -->
+  <button class="bottom-nav-fab" data-view="recipes" onclick="showView('recipes')" aria-label="Recipes">
+    <span class="nav-icon">🍳</span><span class="nav-label">Recipes</span>
   </button>
 </nav>
 
@@ -1102,6 +1178,7 @@ const STORAGE = {
   recipes: 'cb_recipes',
   mealplan: 'cb_mealplan',
   shopping: 'cb_shopping',
+  pantry: 'cb_pantry',
   mealprefs: 'cb_mealprefs',
 };
 
@@ -1112,6 +1189,7 @@ let state = {
   // been through it. Always read slots through mealEntry() so both shapes work.
   mealplan: {},          // { 'YYYY-MM-DD': { breakfast: entry, lunch: entry, dinner: entry } }
   shopping: [],          // [{ item, checked, category? }]
+  pantry: [],            // [{ item, category?, low?, addedAt }]
   filter: 'all',         // 'all' | 'favorites'
   currentWeekStart: null,
   // AI planner preferences, remembered between weeks. Local only — not synced,
@@ -1132,9 +1210,10 @@ function load() {
     state.recipes = JSON.parse(localStorage.getItem(STORAGE.recipes)) || [];
     state.mealplan = JSON.parse(localStorage.getItem(STORAGE.mealplan)) || {};
     state.shopping = JSON.parse(localStorage.getItem(STORAGE.shopping)) || [];
+    state.pantry = JSON.parse(localStorage.getItem(STORAGE.pantry)) || [];
   } catch (e) {
     console.error('Load failed', e);
-    state.recipes = []; state.mealplan = {}; state.shopping = [];
+    state.recipes = []; state.mealplan = {}; state.shopping = []; state.pantry = [];
   }
   try {
     const prefs = JSON.parse(localStorage.getItem(STORAGE.mealprefs));
@@ -1169,6 +1248,7 @@ function save() {
   localStorage.setItem(STORAGE.recipes, JSON.stringify(state.recipes));
   localStorage.setItem(STORAGE.mealplan, JSON.stringify(state.mealplan));
   localStorage.setItem(STORAGE.shopping, JSON.stringify(state.shopping));
+  localStorage.setItem(STORAGE.pantry, JSON.stringify(state.pantry));
 }
 
 /* ---------- Seed data (disabled — new installs start with empty recipe list) ---------- */
@@ -1187,13 +1267,14 @@ function showView(name) {
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.getElementById('view-' + name).classList.add('active');
   // Sync both the top nav and the bottom mobile tab bar
-  document.querySelectorAll('.nav-btn, .bottom-nav-btn').forEach(b => {
+  document.querySelectorAll('.nav-btn, .bottom-nav-btn, .bottom-nav-fab').forEach(b => {
     b.classList.toggle('active', b.dataset.view === name);
   });
   if (name === 'home') loadDailyPick();
   if (name === 'recipes') renderRecipes();
   if (name === 'mealplan') renderMealPlan();
   if (name === 'shopping') renderShoppingList();
+  if (name === 'pantry') renderPantry();
   window.scrollTo({ top: 0, behavior: 'instant' });
 }
 
@@ -1600,6 +1681,26 @@ const CORS_PROXIES = [
     build: url => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(url),
     extract: async resp => await resp.text(),
   },
+  {
+    // Same service, different endpoint — one often works when the other doesn't.
+    name: 'allorigins.win (raw)',
+    build: url => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
+    extract: async resp => await resp.text(),
+  },
+  {
+    name: 'cors.lol',
+    build: url => 'https://api.cors.lol/?url=' + encodeURIComponent(url),
+    extract: async resp => await resp.text(),
+  },
+  {
+    // Last resort: a reader service that renders the page and hands back text.
+    // No structured data survives, so this only feeds the plain-text parser —
+    // but it gets through sites that block ordinary proxies.
+    name: 'r.jina.ai (text only)',
+    build: url => 'https://r.jina.ai/' + url,
+    extract: async resp => await resp.text(),
+    textOnly: true,
+  },
 ];
 
 async function importFromUrl() {
@@ -1617,16 +1718,23 @@ async function importFromUrl() {
   const attempts = [];
   let html = null;
 
+  let usedProxy = null;
   for (const proxy of CORS_PROXIES) {
     try {
-      // 10-second timeout per proxy
+      // 12-second timeout per proxy
       const controller = new AbortController();
-      const t = setTimeout(() => controller.abort(), 10000);
+      const t = setTimeout(() => controller.abort(), 12000);
       const resp = await fetch(proxy.build(url), { signal: controller.signal });
       clearTimeout(t);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      html = await proxy.extract(resp);
-      if (!html || html.length < 100) throw new Error('Response too short');
+      const body = await proxy.extract(resp);
+      if (!body || body.length < 200) throw new Error('response too short');
+      // Some sites answer a proxy with a block page rather than the recipe.
+      if (/access denied|are you a robot|captcha|cf-browser-verification|enable javascript to continue/i.test(body.slice(0, 4000))) {
+        throw new Error('the site blocked it');
+      }
+      html = body;
+      usedProxy = proxy;
       attempts.push(`✓ ${proxy.name}`);
       break;
     } catch (e) {
@@ -1641,13 +1749,28 @@ async function importFromUrl() {
   if (!html) {
     status.innerHTML = `
       <div class="error">
-        <strong>Couldn't grab anything from that link.</strong><br>
-        Some recipe sites just don't let us read them. Try copying the recipe text and using the <strong>Paste Text</strong> tab instead.
+        <strong>Couldn't read that page.</strong><br>
+        Big recipe sites often block anything that isn't a real browser, and
+        every route we have was turned away. Nothing is wrong with the link —
+        open it yourself, copy the recipe, and use the <strong>Paste Text</strong>
+        tab. That always works.
+        <details style="margin-top:8px;">
+          <summary style="cursor:pointer;">What was tried</summary>
+          <div style="font-size:12px; margin-top:6px; line-height:1.7;">
+            ${attempts.map(a => escapeHtml(a)).join('<br>')}
+          </div>
+        </details>
       </div>`;
     return;
   }
 
-  const recipe = parseRecipeFromHtml(html, url);
+  const recipe = (usedProxy && usedProxy.textOnly)
+    ? (function () {
+        const g = parsePastedRecipe(html);
+        if (g && g.ingredients.length >= 3) { g.roughParse = true; return g; }
+        return null;
+      })()
+    : parseRecipeFromHtml(html, url);
   if (!recipe) {
     status.innerHTML = `
       <div class="error">
@@ -1660,24 +1783,91 @@ async function importFromUrl() {
   recipe.createdAt = Date.now();
   state.recipes.push(recipe);
   save();
-  status.innerHTML = `<div class="success">✓ Got it — added "${escapeHtml(recipe.title)}"</div>`;
+  status.innerHTML = recipe.roughParse
+    ? `<div class="notice">✓ Added "${escapeHtml(recipe.title)}" — but this site had no proper recipe markup,
+        so the ingredients and steps were read off the page and may need tidying. Give it a once-over.</div>`
+    : `<div class="success">✓ Got it — added "${escapeHtml(recipe.title)}"</div>`;
   setTimeout(() => showRecipeDetail(recipe.id), 700);
 }
 
 function parseRecipeFromHtml(html, sourceUrl) {
-  // Look for JSON-LD structured data (most recipe sites use this)
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, 'text/html');
+
+  // 1. JSON-LD structured data — what most recipe sites publish.
   const scripts = doc.querySelectorAll('script[type="application/ld+json"]');
   for (const sc of scripts) {
     try {
-      const text = sc.textContent.trim();
-      const json = JSON.parse(text);
+      const json = JSON.parse(sc.textContent.trim());
       const recipe = findRecipeNode(json);
       if (recipe) return jsonLdToRecipe(recipe);
-    } catch (e) { /* try next */ }
+    } catch (e) { /* try the next block */ }
+  }
+
+  // 2. Microdata, which older sites and some big ones still use instead.
+  const micro = microdataToRecipe(doc);
+  if (micro) return micro;
+
+  // 3. Nothing structured. Fall back to reading the visible text the same way
+  //    the Paste Text tab does — imperfect, but far better than giving up.
+  const text = readableTextFrom(doc);
+  if (text) {
+    const guessed = parsePastedRecipe(text);
+    if (guessed && guessed.ingredients.length >= 3 && guessed.instructions.length >= 1) {
+      guessed.roughParse = true;
+      return guessed;
+    }
   }
   return null;
+}
+
+/* schema.org microdata: itemprop="recipeIngredient" and friends. */
+function microdataToRecipe(doc) {
+  const scope = doc.querySelector('[itemtype*="schema.org/Recipe" i]') || doc;
+  const pick = sel => [...scope.querySelectorAll(sel)]
+    .map(n => tidySpacing(n.getAttribute('content') || n.textContent || ''))
+    .filter(Boolean);
+
+  const ingredients = pick('[itemprop="recipeIngredient"], [itemprop="ingredients"]');
+  let instructions = pick('[itemprop="recipeInstructions"] li, [itemprop="recipeInstructions"] p');
+  if (!instructions.length) instructions = pick('[itemprop="recipeInstructions"]');
+  if (instructions.length === 1) instructions = paragraphToSteps(instructions[0]);
+  if (ingredients.length < 2 || !instructions.length) return null;
+
+  const titleNode = scope.querySelector('[itemprop="name"]');
+  const title = tidySpacing((titleNode && (titleNode.getAttribute('content') || titleNode.textContent)) ||
+    (doc.querySelector('h1') && doc.querySelector('h1').textContent) || 'Imported Recipe');
+  const yieldNode = scope.querySelector('[itemprop="recipeYield"]');
+  const yieldText = yieldNode ? (yieldNode.getAttribute('content') || yieldNode.textContent) : '';
+  const servings = parseInt(String(yieldText).match(/\d+/) || [0], 10) || 1;
+  const imgNode = scope.querySelector('[itemprop="image"]');
+
+  return {
+    title,
+    description: '',
+    image: imgNode ? (imgNode.getAttribute('content') || imgNode.getAttribute('src') || '') : '',
+    category: 'Other',
+    tags: [],
+    prepTime: 0, cookTime: 0, servings,
+    ingredients: ingredients.map(name => ({ amount: '', unit: '', name })).filter(keepIngredient),
+    instructions,
+    notes: '', sourceUrl: '', favorite: false,
+  };
+}
+
+/* Strip a page down to the text a reader would see, so the plain-text parser
+   has a chance at pages with no structured data. */
+function readableTextFrom(doc) {
+  const clone = doc.cloneNode(true);
+  clone.querySelectorAll('script, style, noscript, nav, header, footer, aside, form, iframe')
+    .forEach(n => n.remove());
+  const body = clone.body || clone;
+  // Keep block boundaries as newlines so the parser can see structure.
+  body.querySelectorAll('li, p, h1, h2, h3, h4, br, div').forEach(n => {
+    n.insertAdjacentText && n.insertAdjacentText('afterend', '\n');
+  });
+  return (body.textContent || '')
+    .split(/\n+/).map(l => l.replace(/[ \t]+/g, ' ').trim()).filter(Boolean).join('\n');
 }
 
 function findRecipeNode(node) {
@@ -2478,9 +2668,11 @@ function addToTally(tally, qty, unit, rule) {
 
 /* Round to something you could actually pick off a shelf. */
 function roundMass(g) {
-  if (g >= 1000) return `${(Math.ceil(g / 50) * 50 / 1000).toFixed(2).replace(/\.?0+$/, '')} kg`;
-  if (g >= 100)  return `${Math.ceil(g / 10) * 10} g`;
-  return `${Math.max(5, Math.ceil(g / 5) * 5)} g`;
+  // Round to amounts you'd actually ask for at a counter. 310 g of stew meat
+  // is arithmetic; 350 g is a purchase.
+  if (g >= 1000) return `${(Math.ceil(g / 100) * 100 / 1000).toFixed(1).replace(/\.0$/, '')} kg`;
+  if (g >= 100)  return `${Math.ceil(g / 50) * 50} g`;
+  return `${Math.max(10, Math.ceil(g / 10) * 10)} g`;
 }
 function roundVolume(ml) {
   if (ml >= 1000) return `${(Math.ceil(ml / 50) * 50 / 1000).toFixed(2).replace(/\.?0+$/, '')} L`;
@@ -2538,13 +2730,28 @@ function formatShoppingLine(key, display, tally, rule, forms) {
   const observedPlural = [...(forms || [])].find(f => f !== key && f === key + 's')
     || [...(forms || [])].find(f => f !== key && f.startsWith(key.slice(0, -1)) && /s$/.test(f));
 
+  // If the whole week needs a spoonful, you're buying a bottle or a jar, not
+  // "1/2 tsp". Naming it is the useful instruction; the quantity is noise.
+  if (rule.buy !== 'count' && !tally.count && !tally.other.size) {
+    const tinyVolume = tally.ml > 0 && tally.ml <= 30 && !tally.g;
+    const tinyWeight = tally.g > 0 && tally.g <= 20 && !tally.ml;
+    if (tinyVolume || tinyWeight) {
+      return display.charAt(0).toUpperCase() + display.slice(1);
+    }
+  }
+
   const parts = [];
   if (rule.buy === 'count' || (tally.count > 0 && !tally.g && !tally.ml && !tally.other.size)) {
     const n = Math.max(1, Math.ceil(tally.count - 0.001));
     // "3 cloves garlic", "2 cans black beans" — the container gets counted and
     // the ingredient keeps whatever wording the recipes used.
     const unitWord = (rule.per && rule.per.unit) || tally.countUnit;
-    if (unitWord) return `${n} ${pluralize(unitWord, n)} ${display}`;
+    if (unitWord) {
+      // "garlic cloves" + the clove unit would read "3 cloves garlic cloves",
+      // so drop the unit from the name when it's already in there.
+      const noun = display.replace(new RegExp('\\s*' + unitWord + 's?$', 'i'), '').trim() || key;
+      return `${n} ${pluralize(unitWord, n)} ${noun}`;
+    }
     if (n === 1) return `1 ${key}`;
     return `${n} ${observedPlural || pluralize(key, n)}`;
   }
@@ -2597,7 +2804,9 @@ function rebuildShoppingList() {
       if (!map.has(key)) {
         map.set(key, {
           key,
-          display: displayIngredient(ing.key || ing.name) || key,
+          // The recipe's own wording reads better than the normalised key
+          // ("walnuts" rather than "walnut").
+          display: displayIngredient(ing.name || ing.key) || key,
           aisle: resolveAisle(key, ing.aisle),
           // Every wording the recipes used, so we can pick a real plural
           // rather than inventing one.
@@ -2639,6 +2848,168 @@ function rebuildShoppingList() {
     alert('You haven\'t planned any meals this week yet. Head to Meal Plan and add some first.');
   }
   save(); renderShoppingList();
+}
+
+/* ============================================================
+   Pantry — what you've already bought
+
+   Fed mostly by ticking things off the shopping list. Kept deliberately
+   simple: a name, which aisle it belongs to, and whether you're running
+   low on it.
+   ============================================================ */
+
+function pantryKeyOf(text) {
+  // Strip a leading quantity so "350 g stew meat" and "stew meat" match.
+  const withoutQty = String(text || '')
+    .replace(/^\s*[\d./\s]+\s*(kg|g|ml|l|oz|lb|cups?|tbsp|tsp|cans?|cloves?|slices?|bunch(es)?|packs?)?\s+/i, '')
+    .trim();
+  return canonicalIngredient(withoutQty || text);
+}
+
+function findPantryItem(text) {
+  const k = pantryKeyOf(text);
+  return state.pantry.findIndex(p => pantryKeyOf(p.item) === k);
+}
+
+function addPantryItem() {
+  const input = document.getElementById('pantryAddInput');
+  const text = input.value.trim();
+  if (!text) return;
+  if (findPantryItem(text) === -1) {
+    state.pantry.push({ item: text, category: '', low: false, addedAt: Date.now() });
+    save();
+  }
+  input.value = '';
+  renderPantry();
+  setTimeout(() => document.getElementById('pantryAddInput').focus(), 0);
+}
+
+/* Everything ticked off on the shopping list is something you've bought, so
+   move it across and take it off the list. */
+function pullBoughtIntoPantry() {
+  const bought = state.shopping.filter(s => s.checked);
+  if (!bought.length) {
+    alert('Nothing is ticked off on the shopping list yet. Tick things as you put them in the trolley, then come back here.');
+    return;
+  }
+  let added = 0;
+  for (const b of bought) {
+    const at = findPantryItem(b.item);
+    if (at >= 0) {
+      // Already had it — top it up and clear any "running low" flag.
+      state.pantry[at].item = b.item;
+      state.pantry[at].low = false;
+      state.pantry[at].addedAt = Date.now();
+    } else {
+      state.pantry.push({ item: b.item, category: b.category || '', low: false, addedAt: Date.now() });
+      added++;
+    }
+  }
+  state.shopping = state.shopping.filter(s => !s.checked);
+  save();
+  renderPantry();
+  if (document.querySelector('#view-shopping.active')) renderShoppingList();
+  alert(`Moved ${bought.length} item${bought.length === 1 ? '' : 's'} into the pantry` +
+        (added < bought.length ? ` (${bought.length - added} you already had, topped up).` : '.'));
+}
+
+function togglePantryLow(i) {
+  state.pantry[i].low = !state.pantry[i].low;
+  save();
+  renderPantry();
+}
+
+/* Used up — offer to put it straight back on the shopping list. */
+function removePantryItem(i) {
+  const item = state.pantry[i];
+  if (!item) return;
+  state.pantry.splice(i, 1);
+  save();
+  renderPantry();
+}
+
+function addPantryItemToShopping(i) {
+  const item = state.pantry[i];
+  if (!item) return;
+  const already = state.shopping.some(s => pantryKeyOf(s.item) === pantryKeyOf(item.item));
+  if (!already) {
+    state.shopping.push({ item: item.item, checked: false, category: item.category || '' });
+  }
+  item.low = true;
+  save();
+  renderPantry();
+}
+
+function clearRunningLow() {
+  state.pantry.forEach(p => { p.low = false; });
+  save();
+  renderPantry();
+}
+
+function clearPantry() {
+  if (!state.pantry.length) return;
+  if (!confirm('Empty the whole pantry? This only clears the list — it won\'t touch your recipes or shopping list.')) return;
+  state.pantry = [];
+  save();
+  renderPantry();
+}
+
+function renderPantry() {
+  const stats = document.getElementById('pantryStats');
+  const c = document.getElementById('pantryContent');
+  if (!c) return;
+
+  const low = state.pantry.filter(p => p.low).length;
+  const ticked = state.shopping.filter(s => s.checked).length;
+  stats.innerHTML = [
+    `<span class="badge">${state.pantry.length} item${state.pantry.length === 1 ? '' : 's'} in</span>`,
+    low ? `<span class="badge" style="background:var(--accent-soft); color:var(--accent);">${low} running low</span>` : '',
+    ticked ? `<span class="badge">${ticked} ticked off, ready to move in</span>` : '',
+  ].filter(Boolean).join(' ');
+
+  if (!state.pantry.length) {
+    c.innerHTML = `
+      <div class="empty">
+        <div class="empty-icon">🧺</div>
+        <p>Your pantry is empty.</p>
+        <p class="text-muted" style="font-size:13px;">
+          Tick items off on the <a onclick="showView('shopping')" style="cursor:pointer;">shopping list</a>
+          as you buy them, then tap <strong>Add everything I've ticked off</strong>.
+          Or type anything you already have in the box above.
+        </p>
+      </div>`;
+    return;
+  }
+
+  const row = (p, i) => `
+    <li class="pantry-item ${p.low ? 'low' : ''}">
+      <span class="pantry-name">
+        ${escapeHtml(p.item)}
+        ${p.low ? '<small>running low — added to your shopping list</small>' : ''}
+      </span>
+      <button class="pantry-flag ${p.low ? 'on' : ''}" onclick="${p.low ? `togglePantryLow(${i})` : `addPantryItemToShopping(${i})`}"
+              title="${p.low ? 'Not low after all' : 'Running low — put it on the shopping list'}">
+        ${p.low ? '✓ Got it' : 'Running low'}
+      </button>
+      <button class="btn-ghost" onclick="removePantryItem(${i})" title="Used up">✕</button>
+    </li>`;
+
+  // Group by aisle when we know it, same as the shopping list.
+  const hasCategories = state.pantry.some(p => p.category);
+  if (!hasCategories) {
+    c.innerHTML = `<ul>${state.pantry.map(row).join('')}</ul>`;
+    return;
+  }
+  const groups = new Map();
+  state.pantry.forEach((p, i) => {
+    const g = p.category || 'Other';
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(row(p, i));
+  });
+  const names = [...groups.keys()].sort((a, b) => (a === 'Other') - (b === 'Other'));
+  c.innerHTML = names.map(n =>
+    `<div class="shop-group-head">${escapeHtml(n)}</div><ul>${groups.get(n).join('')}</ul>`
+  ).join('');
 }
 
 function copyShoppingList() {
@@ -2760,6 +3131,7 @@ function resetAllData() {
   localStorage.removeItem(STORAGE.recipes);
   localStorage.removeItem(STORAGE.mealplan);
   localStorage.removeItem(STORAGE.shopping);
+  localStorage.removeItem(STORAGE.pantry);
   location.reload();
 }
 
@@ -3209,10 +3581,12 @@ function subscribeToHousehold(id) {
       if (Array.isArray(data.recipes))  state.recipes  = data.recipes;
       if (data.mealplan && typeof data.mealplan === 'object') state.mealplan = data.mealplan;
       if (Array.isArray(data.shopping)) state.shopping = data.shopping;
+      if (Array.isArray(data.pantry))   state.pantry   = data.pantry;
       // Persist locally too
       localStorage.setItem(STORAGE.recipes,  JSON.stringify(state.recipes));
       localStorage.setItem(STORAGE.mealplan, JSON.stringify(state.mealplan));
       localStorage.setItem(STORAGE.shopping, JSON.stringify(state.shopping));
+      localStorage.setItem(STORAGE.pantry,   JSON.stringify(state.pantry));
       // Re-render whatever view is active
       const activeView = document.querySelector('.view.active');
       if (activeView) {
@@ -3220,6 +3594,7 @@ function subscribeToHousehold(id) {
         if (vid === 'recipes') renderRecipes();
         else if (vid === 'mealplan') renderMealPlan();
         else if (vid === 'shopping') renderShoppingList();
+        else if (vid === 'pantry')   renderPantry();
       }
     } finally {
       _suppressSync = false;
@@ -3241,6 +3616,7 @@ save = function() {
     recipes: state.recipes,
     mealplan: state.mealplan,
     shopping: state.shopping,
+    pantry: state.pantry,
     updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
   }, { merge: true }).catch(e => {
     console.error('Sync push failed', e);
