@@ -829,7 +829,7 @@
         <option value="">All categories</option>
       </select>
       <button class="btn-ghost" style="font-size:12px; margin-left:auto;" onclick="repairInstructions()"
-              title="Re-split walls of text and re-fetch missing steps">🛠 Fix instructions</button>
+              title="Rebuild garbled steps and drop non-food ingredients">🛠 Fix recipes</button>
       <button class="btn-ghost" style="font-size:12px;" onclick="resetAllData()" title="Clear everything">↻ Reset</button>
     </div>
 
@@ -1732,7 +1732,7 @@ function jsonLdToRecipe(r) {
   })();
   const ingredients = (r.recipeIngredient || []).map(ing => ({
     amount: '', unit: '', name: typeof ing === 'string' ? ing.trim() : getStr(ing)
-  }));
+  })).filter(keepIngredient);
 
   // Yield → servings
   let servings = 1;
@@ -2268,12 +2268,50 @@ const PREP_WORDS = ['chopped', 'finely chopped', 'roughly chopped', 'coarsely ch
   'rinsed', 'drained', 'divided', 'melted', 'softened', 'beaten', 'packed',
   'plus more', 'to taste', 'for garnish', 'for serving', 'optional'];
 
+/* Words the -s rule gets wrong. Left alone or mapped explicitly rather than
+   chopped into things like "molass", "bay leave" and "asparaguse". */
+const IRREGULAR_PLURALS = {
+  leaves: 'leaf', loaves: 'loaf', halves: 'half', knives: 'knife',
+  shelves: 'shelf', calves: 'calf',
+};
+const NEVER_SINGULAR = new Set([
+  'molasses', 'asparagus', 'couscous', 'hummus', 'greens', 'oats', 'grits',
+  'chips', 'crisps', 'sprouts', 'noodles', 'oregano', 'hummus', 'harissa',
+  'swiss', 'watercress', 'cress', 'bass', 'anise', 'chorizo',
+]);
 function singularize(w) {
-  if (/(ss|us|is)$/.test(w)) return w;
+  if (IRREGULAR_PLURALS[w]) return IRREGULAR_PLURALS[w];
+  if (NEVER_SINGULAR.has(w)) return w;
+  if (w.length <= 3) return w;
+  if (/(ss|us|is|os|ous)$/.test(w)) return w;
   if (/ies$/.test(w)) return w.slice(0, -3) + 'y';
-  if (/(oes|ches|shes|xes|sses)$/.test(w)) return w.slice(0, -2);
+  if (/(oes|ches|shes|xes)$/.test(w)) return w.slice(0, -2);
   if (/s$/.test(w)) return w.slice(0, -1);
   return w;
+}
+
+/* Text that is plainly not food. Recipe pages leak navigation and boilerplate
+   into their markup, and an importer that grabs it produces "ingredients"
+   like "news" or "subscribe". */
+const NOT_FOOD = new Set([
+  'news', 'home', 'menu', 'recipes', 'recipe', 'search', 'subscribe', 'login',
+  'sign in', 'advertisement', 'ad', 'share', 'print', 'save', 'jump to recipe',
+  'ingredients', 'instructions', 'directions', 'method', 'nutrition', 'notes',
+  'about', 'contact', 'privacy', 'cookies', 'newsletter', 'comments', 'reviews',
+  'more', 'related', 'shop', 'video', 'photo', 'image', 'servings', 'serving',
+  'prep time', 'cook time', 'total time', 'course', 'cuisine', 'calories',
+]);
+function looksLikeFood() {
+  // Checked against every form of the name, because singularising can turn a
+  // junk word into one that isn't on the list ("news" -> "new").
+  for (const v of arguments) {
+    const t = String(v || '').trim();
+    if (!t) continue;
+    if (NOT_FOOD.has(t)) return false;
+    if (NOT_FOOD.has(t + 's')) return false;
+  }
+  const key = String(arguments[0] || '').trim();
+  return key.length >= 2;
 }
 
 /* Strip the prep instructions off a name, leaving what you'd actually buy.
@@ -2360,6 +2398,34 @@ const STAPLE_PATTERNS = [
   /baking powder/, /baking soda/, /vanilla extract/, /cornstarch/, /corn starch/,
 ];
 
+/* Spoonacular's aisle is per-ingredient and occasionally follows what the
+   ingredient is *used for* rather than where you buy it — an orange for
+   juicing comes back under Beverages, which puts fruit in the Drinks section
+   with no hint whether it means the fruit or a carton. Where we know the
+   ingredient, we know the aisle better than the label does. */
+const KNOWN_AISLE = {};
+(function () {
+  const produce = ['onion', 'red onion', 'yellow onion', 'white onion', 'shallot',
+    'spring onion', 'scallion', 'green onion', 'leek', 'carrot', 'celery', 'potato',
+    'sweet potato', 'tomato', 'bell pepper', 'red pepper', 'green pepper',
+    'yellow pepper', 'jalapeno', 'chili pepper', 'cucumber', 'zucchini', 'courgette',
+    'eggplant', 'aubergine', 'avocado', 'apple', 'banana', 'lemon', 'lime', 'orange',
+    'garlic', 'corn', 'broccoli', 'cauliflower', 'lettuce', 'mushroom', 'spinach',
+    'kale', 'ginger', 'parsley', 'coriander', 'cilantro', 'basil', 'mint', 'rocket',
+    'arugula', 'cabbage', 'pea', 'green bean', 'asparagus', 'pear', 'grape',
+    'strawberry', 'blueberry', 'raspberry', 'lemon zest', 'lime zest'];
+  for (const p of produce) KNOWN_AISLE[p] = 'Produce';
+  KNOWN_AISLE['egg'] = 'Dairy & Eggs';
+  KNOWN_AISLE['chicken breast'] = 'Meat & Fish';
+  KNOWN_AISLE['chicken thigh'] = 'Meat & Fish';
+  KNOWN_AISLE['tortilla'] = 'Bakery';
+  KNOWN_AISLE['bay leaf'] = 'Herbs & Spices';
+})();
+
+function resolveAisle(key, spoonAisle) {
+  return KNOWN_AISLE[key] || spoonAisle || '';
+}
+
 /* Decide how an ingredient should appear on the list. */
 function shoppingRule(key, aisle) {
   for (const re of STAPLE_PATTERNS) if (re.test(key)) return { buy: 'staple' };
@@ -2430,6 +2496,8 @@ const OES_PLURALS = ['tomato', 'potato', 'mango', 'hero'];
 function pluralize(word, n) {
   if (n <= 1) return word;
   const last = word.split(' ').pop();
+  // Mass nouns and words that are already plural stay as they are.
+  if (NEVER_SINGULAR.has(last)) return word;
   if (OES_PLURALS.includes(last)) return word + 'es';
   if (/(s|x|ch|sh)$/.test(word)) return word + 'es';
   if (/[^aeiou]y$/.test(word)) return word.slice(0, -1) + 'ies';
@@ -2458,11 +2526,17 @@ const G_PER_CUP = {
 /* Turn a finished tally into the line you'll read in the shop.
    `key` is the singular grouping name ("onion"); `display` is the wording as
    the recipes had it ("onions", "black beans"). */
-function formatShoppingLine(key, display, tally, rule) {
+function formatShoppingLine(key, display, tally, rule, forms) {
   if (rule.buy === 'staple') {
     // Capitalised and unquantified: a nudge to check the cupboard.
     return display.charAt(0).toUpperCase() + display.slice(1);
   }
+
+  // Prefer a plural the recipes actually used over one we construct. Guessing
+  // is how "bay leaf" became "bay leaves" correctly but "molasses" became
+  // "molass" — the recipe's own wording is never wrong.
+  const observedPlural = [...(forms || [])].find(f => f !== key && f === key + 's')
+    || [...(forms || [])].find(f => f !== key && f.startsWith(key.slice(0, -1)) && /s$/.test(f));
 
   const parts = [];
   if (rule.buy === 'count' || (tally.count > 0 && !tally.g && !tally.ml && !tally.other.size)) {
@@ -2471,8 +2545,8 @@ function formatShoppingLine(key, display, tally, rule) {
     // the ingredient keeps whatever wording the recipes used.
     const unitWord = (rule.per && rule.per.unit) || tally.countUnit;
     if (unitWord) return `${n} ${pluralize(unitWord, n)} ${display}`;
-    // "2 onions" — count the thing itself, so pluralise from the singular.
-    return `${n} ${pluralize(key, n)}`;
+    if (n === 1) return `1 ${key}`;
+    return `${n} ${observedPlural || pluralize(key, n)}`;
   }
   if (tally.g)  parts.push(roundMass(tally.g));
   if (tally.ml) parts.push(roundVolume(tally.ml));
@@ -2515,16 +2589,26 @@ function rebuildShoppingList() {
       // Spoonacular hands us a clean name; anything else gets canonicalised.
       const key = canonicalIngredient(ing.key || ing.name);
       if (!key || key === 'water' || key === 'ice') continue;
+      // Page furniture that an importer mistook for an ingredient. Checked
+      // against every wording, since the raw name and the canonical key can
+      // differ ("news" becomes "new").
+      if (!looksLikeFood(key, displayIngredient(ing.key || ing.name),
+                         displayIngredient(ing.name), String(ing.name || '').toLowerCase().trim())) continue;
       if (!map.has(key)) {
         map.set(key, {
           key,
           display: displayIngredient(ing.key || ing.name) || key,
-          aisle: ing.aisle || '',
+          aisle: resolveAisle(key, ing.aisle),
+          // Every wording the recipes used, so we can pick a real plural
+          // rather than inventing one.
+          forms: new Set(),
           tally: { g: 0, ml: 0, count: 0, countUnit: '', other: new Map() },
         });
       }
       const bucket = map.get(key);
-      if (!bucket.aisle && ing.aisle) bucket.aisle = ing.aisle;
+      if (!bucket.aisle) bucket.aisle = resolveAisle(key, ing.aisle);
+      const form = displayIngredient(ing.name || ing.key);
+      if (form) bucket.forms.add(form);
 
       const rule = shoppingRule(key, bucket.aisle);
       if (rule.buy === 'staple') continue;          // no quantity needed
@@ -2536,7 +2620,7 @@ function rebuildShoppingList() {
 
   state.shopping = [...map.values()].map(v => {
     const rule = shoppingRule(v.key, v.aisle);
-    const out = { item: formatShoppingLine(v.key, v.display, v.tally, rule), checked: false };
+    const out = { item: formatShoppingLine(v.key, v.display, v.tally, rule, v.forms), checked: false };
     if (v.aisle) out.category = v.aisle;
     return out;
   });
@@ -2595,7 +2679,17 @@ function addShoppingItem() {
    walls of text, and re-fetch anything that came in with its method missing. */
 async function repairInstructions() {
   const splitFixed = [];
+  let junkDropped = 0;
   for (const r of state.recipes) {
+    // Page furniture an importer mistook for an ingredient.
+    if (Array.isArray(r.ingredients)) {
+      const kept = r.ingredients.filter(keepIngredient);
+      if (kept.length !== r.ingredients.length) {
+        junkDropped += r.ingredients.length - kept.length;
+        r.ingredients = kept;
+      }
+    }
+
     const cur = (r.instructions || []).map(s => String(s));
     if (!cur.length) continue;
     const before = cur.join(' ');
@@ -2653,11 +2747,12 @@ async function repairInstructions() {
   renderRecipes();
 
   const bits = [];
-  if (splitFixed.length) bits.push(`${splitFixed.length} broken into readable steps`);
+  if (junkDropped) bits.push(`${junkDropped} non-food ingredient${junkDropped === 1 ? '' : 's'} removed`);
+  if (splitFixed.length) bits.push(`${splitFixed.length} had their steps rebuilt`);
   if (refetched) bits.push(`${refetched} re-fetched in full`);
   const stuck = state.recipes.filter(r => stepsUnusable(r.instructions)).length;
   if (stuck) bits.push(`${stuck} still without usable steps — those need editing by hand, or re-importing from the original link`);
-  alert(bits.length ? 'Done:\n\n• ' + bits.join('\n• ') : 'Nothing needed fixing — all your recipes have usable steps.');
+  alert(bits.length ? 'Done:\n\n• ' + bits.join('\n• ') : 'Nothing needed fixing — your recipes all look healthy.');
 }
 
 function resetAllData() {
@@ -3345,8 +3440,8 @@ function decodeEntities(s) {
 
 function tidySpacing(s) {
   return decodeEntities(s)
-    .replace(/[   ]/g, ' ')        // non-breaking spaces
-    .replace(/[​-‍﻿­]/g, '')  // zero-width and soft hyphens
+    .replace(/[\u00a0\u2007\u202f]/g, ' ')          // non-breaking spaces
+    .replace(/[\u200b-\u200d\ufeff\u00ad]/g, '')   // zero-width and soft hyphens
     .replace(/\s+/g, ' ')
     .replace(/([.!?])([A-Z])/g, '$1 $2')
     // A step number glued to the previous sentence ("...oven.1.Chop") needs
@@ -3728,6 +3823,15 @@ function tidyAisle(raw) {
   return 'Other';
 }
 
+/* Keep an ingredient only if it looks like food. Importers occasionally scrape
+   a page's navigation into the ingredient list, which is where entries like
+   "news" and "subscribe" come from. */
+function keepIngredient(i) {
+  if (!i || !i.name) return false;
+  const raw = String(i.name).toLowerCase().trim();
+  return looksLikeFood(canonicalIngredient(i.key || i.name), displayIngredient(i.name), raw);
+}
+
 function convertSpoonacularRecipe(r) {
   return {
     // Kept so we can tell we already have this one and don't save it twice.
@@ -3744,14 +3848,14 @@ function convertSpoonacularRecipe(r) {
       amount: decimalToFraction(i.amount),
       unit: i.unit || '',
       // What the recipe page shows — "chopped onions", as the cook wrote it.
-      name: i.originalName || i.name || '',
+      name: tidySpacing(i.originalName || i.name || ''),
       // What the shopping list groups on. Spoonacular normalises this for us
       // ("onion"), which is how the same thing across three recipes ends up
       // on one line instead of three.
       key: i.nameClean || i.name || '',
       // Which part of the shop it lives in.
       aisle: tidyAisle(i.aisle),
-    })),
+    })).filter(keepIngredient),
     instructions: spoonSteps(r),
     notes: '',
     sourceUrl: r.sourceUrl || '',
