@@ -353,6 +353,30 @@
   }
   .sync-dot.invite { background: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 
+  /* A count on the household button, so an invite is visible from anywhere. */
+  .sync-btn { position: relative; }
+  .invite-badge {
+    position: absolute; top: -6px; right: -6px;
+    min-width: 19px; height: 19px; padding: 0 5px;
+    border-radius: 999px; background: var(--danger); color: #fff;
+    font-size: 11px; font-weight: 700; line-height: 19px; text-align: center;
+    box-shadow: 0 0 0 2px var(--surface);
+    animation: invitePop 0.25s ease-out;
+  }
+  @keyframes invitePop { from { transform: scale(0.4); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+
+  /* The invite itself, at the top of whatever page you're on. */
+  .invite-banner {
+    background: var(--surface); border: 1px solid var(--accent);
+    border-left: 4px solid var(--accent);
+    border-radius: 14px; padding: 14px 16px; margin-bottom: 18px;
+    box-shadow: var(--shadow);
+  }
+  .invite-banner + .invite-banner { margin-top: -8px; }
+  .invite-banner-title { font-weight: 700; font-size: 14px; margin-bottom: 3px; }
+  .invite-banner-sub { font-size: 13px; color: var(--ink-soft); margin-bottom: 12px; }
+  .invite-banner-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
   /* ---------- Account / auth UI ---------- */
   .apple-btn {
     width: 100%; background: #000; color: #fff; border: none; border-radius: 12px;
@@ -840,6 +864,7 @@
     </div>
     <button class="sync-btn" onclick="openSyncModal()" title="Account &amp; household sharing">
       <span class="sync-dot" id="syncDot"></span><span class="sync-label" id="syncLabel">Sign in</span>
+      <span class="invite-badge" id="inviteBadge" style="display:none;"></span>
     </button>
     <nav>
       <button class="nav-btn active" data-view="home" onclick="showView('home')">Home</button>
@@ -852,6 +877,9 @@
 </header>
 
 <main>
+
+  <!-- Household invites, shown above whatever page you're on -->
+  <div id="inviteBanners"></div>
 
   <!-- ========== Home View (landing) ========== -->
   <section id="view-home" class="view active">
@@ -3453,8 +3481,41 @@ function setSyncDot(state) {
 function updateHeaderButton() {
   const label = document.getElementById('syncLabel');
   if (label) label.textContent = _user ? 'Household' : 'Sign in';
-  if (_user && _pendingInvites.length && !_unsubscribe) setSyncDot('invite');
+
+  // The count shows wherever you are, including when you're already sharing
+  // with someone — an invite to a different household still matters.
+  const badge = document.getElementById('inviteBadge');
+  const n = (_user && _pendingInvites) ? _pendingInvites.length : 0;
+  if (badge) {
+    badge.textContent = n > 9 ? '9+' : String(n);
+    badge.style.display = n ? '' : 'none';
+  }
+
+  if (_user && n && !_unsubscribe) setSyncDot('invite');
   else if (!_unsubscribe) setSyncDot('idle');
+  renderInviteBanners();
+}
+
+/* An invite you can act on without hunting for it. */
+function renderInviteBanners() {
+  const host = document.getElementById('inviteBanners');
+  if (!host) return;
+  if (!_user || !_pendingInvites || !_pendingInvites.length) { host.innerHTML = ''; return; }
+  host.innerHTML = _pendingInvites.map(inv => {
+    const who = (inv.invitedBy && (inv.invitedBy.name || inv.invitedBy.email)) || 'Someone';
+    return `
+      <div class="invite-banner">
+        <div class="invite-banner-title">${escapeHtml(who)} wants to share a recipe book with you</div>
+        <div class="invite-banner-sub">
+          Accept and you'll both see the same recipes, meal plans, shopping list and pantry.
+          ${_householdId ? 'You\'re already sharing with someone, so this would move you across.' : ''}
+        </div>
+        <div class="invite-banner-actions">
+          <button class="btn btn-small" onclick="acceptInvite('${escapeHtml(inv.id)}')">Accept</button>
+          <button class="btn-secondary btn-small" onclick="declineInvite('${escapeHtml(inv.id)}')">No thanks</button>
+        </div>
+      </div>`;
+  }).join('');
 }
 
 async function initFirebase() {
@@ -3485,9 +3546,11 @@ async function handleAuthState(user) {
       await ensureUserDoc(user);
       await resolveHousehold();
       await refreshInvites();
+      subscribeToInvites();
     } catch (e) { console.error('Post-sign-in setup failed', e); }
   } else {
     if (_unsubscribe) { _unsubscribe(); _unsubscribe = null; }
+    if (_inviteUnsub) { _inviteUnsub(); _inviteUnsub = null; }
     _householdId = null; _members = {}; _pendingInvites = []; _sentInvites = [];
   }
   updateHeaderButton();
@@ -3520,6 +3583,37 @@ async function resolveHousehold() {
   const hid = (prof.exists && prof.data().householdId) || null;
   _householdId = hid;
   if (hid) subscribeToHousehold(hid);
+}
+
+let _inviteUnsub = null;
+
+/* Watch for invites addressed to this person, so one sent while the app is
+   open turns up straight away instead of on the next reload. */
+function subscribeToInvites() {
+  if (_inviteUnsub) { _inviteUnsub(); _inviteUnsub = null; }
+  if (!_user || !_user.email || !_db) return;
+  try {
+    _inviteUnsub = _db.collection('invites')
+      .where('email', '==', _user.email.toLowerCase())
+      .where('status', '==', 'pending')
+      .onSnapshot(snap => {
+        const before = _pendingInvites.map(i => i.id).join(',');
+        _pendingInvites = snap.docs
+          .map(d => Object.assign({ id: d.id }, d.data()))
+          .filter(i => i.householdId !== _householdId);
+        updateHeaderButton();
+        if (_syncModalOpen) renderSyncModal();
+        // Bring a brand-new invite to their attention rather than waiting for
+        // them to notice the badge.
+        const after = _pendingInvites.map(i => i.id).join(',');
+        if (after && after !== before) {
+          const el = document.getElementById('inviteBanners');
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+      }, err => console.warn('Invite watch failed:', err));
+  } catch (e) {
+    console.warn('Could not watch for invites:', e);
+  }
 }
 
 async function refreshInvites() {
@@ -3796,6 +3890,8 @@ async function sendInvite() {
     });
     await refreshInvites();
     renderSyncModal();
+    if (input) input.value = '';
+    alert(`Invite sent to ${email}.\n\nThey'll see it in the app next time they open it — as long as they've signed in with that same email address.`);
   } catch (e) {
     console.error('sendInvite failed', e);
     console.warn('Invite failed:', e);
