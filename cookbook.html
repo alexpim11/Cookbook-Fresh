@@ -3137,33 +3137,53 @@ async function repairInstructions() {
     if (r.instructions.join(' ') !== before) splitFixed.push(r.title);
   }
 
-  // Anything still unusable that we know the Spoonacular id for can be
-  // fetched again properly.
-  const refetchable = state.recipes.filter(r => r.spoonId && stepsLookThin(r.instructions));
-  let refetched = 0;
+  // Recipes that came from the recipe finder can be fetched again from
+  // scratch. This is the only way to undo damage done to the steps
+  // themselves — tidying can remove obvious rubbish, but it can't put back a
+  // method that was overwritten.
+  const restorable = state.recipes.filter(r => r.spoonId);
+  const unknown = state.recipes.length - restorable.length;
+  let restored = 0;
 
-  if (refetchable.length && spoonKey()) {
+  if (restorable.length && spoonKey()) {
+    const thin = restorable.filter(r => stepsLookThin(r.instructions)).length;
     const ok = confirm(
-      `${refetchable.length} recipe${refetchable.length === 1 ? '' : 's'} ` +
-      `${refetchable.length === 1 ? 'is' : 'are'} missing most of the method.\n\n` +
-      `Go and fetch the full versions? It only takes a moment, and it uses a small ` +
-      `part of the day's allowance for looking recipes up.`
+      `${restorable.length} of your recipes came from the recipe finder.\n\n` +
+      `Fetch their original ingredients and steps again? This replaces what's ` +
+      `currently saved for those recipes — your notes, favourites and meal ` +
+      `plans are kept.\n\n` +
+      (thin ? `${thin} of them ${thin === 1 ? 'is' : 'are'} missing most of the method, ` +
+              `so ${thin === 1 ? 'it' : 'they'} would definitely benefit.\n\n` : '') +
+      `It uses part of today's allowance for looking recipes up.`
     );
     if (ok) {
       try {
-        // Chunked so the URL stays a sensible length.
-        for (let i = 0; i < refetchable.length; i += 20) {
-          const chunk = refetchable.slice(i, i + 20);
+        // Chunked so each request stays a sensible size.
+        for (let i = 0; i < restorable.length; i += 20) {
+          const chunk = restorable.slice(i, i + 20);
           const full = await fetchFullRecipes(chunk.map(r => r.spoonId));
           for (const r of chunk) {
             const raw = full.get(r.spoonId);
             if (!raw) continue;
-            const steps = spoonSteps(raw);
-            if (steps.length && !stepsLookThin(steps)) { r.instructions = steps; refetched++; }
+            const fresh = convertSpoonacularRecipe(raw);
+            if (!fresh || !fresh.ingredients.length) continue;
+            // Replace what came from the source; keep what's yours.
+            r.title = fresh.title;
+            r.description = fresh.description;
+            r.image = fresh.image || r.image;
+            r.category = fresh.category;
+            r.tags = fresh.tags;
+            r.prepTime = fresh.prepTime;
+            r.cookTime = fresh.cookTime;
+            r.servings = fresh.servings;
+            r.ingredients = fresh.ingredients;
+            r.sourceUrl = fresh.sourceUrl || r.sourceUrl;
+            if (fresh.instructions.length) r.instructions = fresh.instructions;
+            restored++;
           }
         }
       } catch (e) {
-        console.warn('Recipe lookup failed:', e);
+        console.warn('Recipe refresh failed:', e);
         alert('Couldn\'t reach the recipe finder just now. Check you\'re online and try again.');
       }
     }
@@ -3182,7 +3202,14 @@ async function repairInstructions() {
   if (splitFixed.length) bits.push(splitFixed.length === 1
     ? `1 recipe had its steps tidied up`
     : `${splitFixed.length} recipes had their steps tidied up`);
-  if (refetched) bits.push(`${refetched} re-fetched in full`);
+  if (restored) bits.push(restored === 1
+    ? `1 recipe was fetched again from the recipe finder`
+    : `${restored} recipes were fetched again from the recipe finder`);
+  // Recipes we can't refresh: typed in by hand, or brought in from a link
+  // before the app started remembering where they came from.
+  if (unknown && restored) bits.push(unknown === 1
+    ? `1 recipe wasn't from the recipe finder, so it was only tidied`
+    : `${unknown} recipes weren't from the recipe finder, so they were only tidied`);
   const stuck = state.recipes.filter(r => stepsUnusable(r.instructions)).length;
   if (stuck) bits.push(stuck === 1
     ? `1 recipe still has no proper method — you'll need to type it in, or bring it in again from the original page`
