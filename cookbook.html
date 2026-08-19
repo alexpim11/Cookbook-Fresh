@@ -936,14 +936,16 @@
     <!-- Paste Text -->
     <div id="tab-paste" class="tab-panel">
       <div class="form">
-        <p class="text-muted" style="margin-top:0;">Paste in a recipe you copied from somewhere — title, ingredients, steps, all of it. We'll sort it out so you can look it over.</p>
+        <p class="text-muted" style="margin-top:0;">Paste in a recipe you copied from somewhere — title, ingredients, steps, all of it.
+          It doesn't need tidying first; headings, blog waffle and stray link text are all fine. We'll sort it out so you can look it over.</p>
         <div class="form-row">
           <label>Recipe text</label>
           <textarea id="pasteInput" rows="14" placeholder="Title: Grandma's Apple Pie&#10;&#10;Ingredients:&#10;- 2 cups flour&#10;- 1 cup butter&#10;- 6 apples, sliced&#10;&#10;Instructions:&#10;1. Mix flour and butter...&#10;2. ..."></textarea>
         </div>
         <div class="form-actions">
-          <button class="btn" onclick="importFromPaste()">Parse Recipe</button>
+          <button class="btn" id="pasteBtn" onclick="importFromPaste()">Read Recipe</button>
         </div>
+        <div id="pasteStatus"></div>
       </div>
     </div>
 
@@ -1387,7 +1389,10 @@ function renderRecipeDetail(r, mode) {
         <button class="btn-danger btn-small" onclick="deleteRecipe('${r.id}')">Delete</button>
       </div>`;
   const c = document.getElementById('detailContent');
+  const note = _oneOffRecipeNote;
+  _oneOffRecipeNote = '';
   c.innerHTML = `
+    ${note ? `<div class="notice">${escapeHtml(note)}</div>` : ''}
     <div class="detail">
       <div class="detail-hero" ${r.image ? `style="background-image:url('${escapeHtml(r.image)}')"` : ''}>
         ${!r.image ? '🍴' : ''}
@@ -2001,16 +2006,133 @@ function jsonLdToRecipe(r) {
 }
 
 /* ---------- Paste-text Import ---------- */
-function importFromPaste() {
-  const text = document.getElementById('pasteInput').value.trim();
-  if (!text) return alert('Paste a recipe in first.');
+/* What we ask for back when reading pasted text. Everything is required so
+   the reply always has the same shape. */
+const AI_PASTE_SCHEMA = {
+  name: 'pasted_recipe',
+  strict: true,
+  schema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['found', 'title', 'description', 'category', 'tags', 'prepTime',
+               'cookTime', 'servings', 'ingredients', 'instructions', 'notes'],
+    properties: {
+      found: { type: 'boolean', description: 'False if the text contains no recipe at all.' },
+      title: { type: 'string' },
+      description: { type: 'string', description: 'One sentence, or empty. Do not invent one.' },
+      category: { type: 'string', enum: ['Breakfast', 'Lunch', 'Dinner', 'Dessert', 'Snack', 'Drink', 'Side', 'Other'] },
+      tags: { type: 'array', items: { type: 'string' } },
+      prepTime: { type: 'integer', description: 'Minutes, 0 if not stated.' },
+      cookTime: { type: 'integer', description: 'Minutes, 0 if not stated.' },
+      servings: { type: 'integer', description: '0 if not stated.' },
+      ingredients: {
+        type: 'array',
+        items: {
+          type: 'object', additionalProperties: false,
+          required: ['amount', 'unit', 'name'],
+          properties: {
+            amount: { type: 'string', description: 'Just the number, e.g. "2" or "1 1/2". Empty if none given.' },
+            unit: { type: 'string', description: 'e.g. "g", "tbsp", "cup". Empty for whole items.' },
+            name: { type: 'string', description: 'The ingredient as written, without the amount.' }
+          }
+        }
+      },
+      instructions: { type: 'array', items: { type: 'string' }, description: 'One entry per step.' },
+      notes: { type: 'string', description: 'Any tips or storage advice given. Empty if none.' }
+    }
+  }
+};
 
-  const recipe = parsePastedRecipe(text);
+const AI_PASTE_SYSTEM = [
+  'You pull a recipe out of text someone has copied off a web page.',
+  '',
+  'Rules:',
+  '1. Copy only what is actually there. Never invent an ingredient, a step, a time or a serving count. Use 0 or an empty string when something is not stated.',
+  '2. Ignore everything that is not the recipe: navigation, share and social links, adverts, comments, author biography, "jump to recipe", nutrition panels, related recipes and newsletter prompts.',
+  '3. Split the method into one instruction per step, following the author\'s own numbering when they used it.',
+  '4. Separate each ingredient into its amount, its unit and its name. "1/2 cup chopped onions" is amount "1/2", unit "cup", name "chopped onions".',
+  '5. Keep the wording the author used. Do not rewrite, shorten or improve the steps.',
+  '6. If the text is not a recipe at all, set found to false and leave everything else empty.',
+].join('\n');
+
+async function importFromPaste() {
+  const raw = document.getElementById('pasteInput').value.trim();
+  const status = document.getElementById('pasteStatus');
+  const btn = document.getElementById('pasteBtn');
+  if (!raw) return alert('Paste a recipe in first.');
+
+  let recipe = null;
+  let readSmartly = false;
+
+  if (isAIConfigured()) {
+    btn.disabled = true;
+    startCookingPhraseLoop(status, ['Reading what you pasted', 'Picking out the ingredients',
+      'Sorting the steps into order', 'Ignoring the bits that aren\'t the recipe']);
+    try {
+      // Bound the size so a whole page pasted in doesn't cost a fortune.
+      const text = raw.length > 24000 ? raw.slice(0, 24000) : raw;
+      const parsed = await callOpenAI([
+        { role: 'system', content: AI_PASTE_SYSTEM },
+        { role: 'user', content: text },
+      ], AI_PASTE_SCHEMA);
+      if (parsed && parsed.found && (parsed.ingredients || []).length) {
+        recipe = aiPasteToRecipe(parsed);
+        readSmartly = true;
+      } else if (parsed && !parsed.found) {
+        stopCookingPhraseLoop();
+        btn.disabled = false;
+        status.innerHTML = '<div class="error">That doesn\'t look like a recipe. Paste the title, ingredients and steps and try again.</div>';
+        return;
+      }
+    } catch (e) {
+      // Reading it ourselves is always available, so this is never fatal.
+      console.warn('Smart paste unavailable:', e.message);
+    }
+    stopCookingPhraseLoop();
+    btn.disabled = false;
+  }
+
+  if (!recipe) recipe = parsePastedRecipe(raw);
+
   recipe.id = uid();
   recipe.createdAt = Date.now();
   state.recipes.push(recipe);
   save();
+  status.innerHTML = '';
+  document.getElementById('pasteInput').value = '';
+  if (!readSmartly) {
+    _oneOffRecipeNote = 'Read this through before you cook it — pasted text is sorted out as best we can, so a step or an amount may need a tidy.';
+  }
   showRecipeDetail(recipe.id);
+}
+
+/* A note shown once, at the top of the recipe that was just added. Cleared as
+   soon as it's been shown, so it never sticks to the recipe. */
+let _oneOffRecipeNote = '';
+
+/* Turn the reply into the shape the rest of the app stores. */
+function aiPasteToRecipe(p) {
+  return {
+    title: tidySpacing(p.title || '') || 'Pasted Recipe',
+    description: tidySpacing(p.description || ''),
+    image: '',
+    category: p.category || 'Other',
+    tags: (Array.isArray(p.tags) ? p.tags : []).filter(t => t && t.length <= 28).slice(0, 6),
+    prepTime: Number(p.prepTime) || 0,
+    cookTime: Number(p.cookTime) || 0,
+    servings: Number(p.servings) || 1,
+    ingredients: (Array.isArray(p.ingredients) ? p.ingredients : [])
+      .filter(i => i && i.name)
+      .map(i => ({ amount: String(i.amount || '').trim(), unit: String(i.unit || '').trim(),
+                   name: tidySpacing(i.name) }))
+      .filter(keepIngredient),
+    instructions: (Array.isArray(p.instructions) ? p.instructions : [])
+      .map(x => stripStepPrefix(stripBullet(tidySpacing(x))))
+      .filter(x => x && looksLikeInstruction(x)),
+    notes: tidySpacing(p.notes || ''),
+    sourceUrl: '',
+    favorite: false,
+  };
 }
 
 function parsePastedRecipe(text) {
