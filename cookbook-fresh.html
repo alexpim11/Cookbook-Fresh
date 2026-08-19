@@ -1735,10 +1735,12 @@ async function importFromUrl() {
       }
       html = body;
       usedProxy = proxy;
-      attempts.push(`✓ ${proxy.name}`);
+      attempts.push(`ok:${proxy.name}`);
       break;
     } catch (e) {
-      attempts.push(`✗ ${proxy.name} (${e.name === 'AbortError' ? 'timeout' : e.message})`);
+      // Kept for the console only — the person sees a plain summary.
+      console.warn(`Recipe import route "${proxy.name}" failed:`, e.message);
+      attempts.push(`failed:${proxy.name}`);
       html = null;
     }
   }
@@ -1754,12 +1756,9 @@ async function importFromUrl() {
         every route we have was turned away. Nothing is wrong with the link —
         open it yourself, copy the recipe, and use the <strong>Paste Text</strong>
         tab. That always works.
-        <details style="margin-top:8px;">
-          <summary style="cursor:pointer;">What was tried</summary>
-          <div style="font-size:12px; margin-top:6px; line-height:1.7;">
-            ${attempts.map(a => escapeHtml(a)).join('<br>')}
-          </div>
-        </details>
+        <div class="text-muted" style="font-size:12px; margin-top:8px;">
+          ${attempts.length} different ways of reading the page were tried.
+        </div>
       </div>`;
     return;
   }
@@ -1784,8 +1783,9 @@ async function importFromUrl() {
   state.recipes.push(recipe);
   save();
   status.innerHTML = recipe.roughParse
-    ? `<div class="notice">✓ Added "${escapeHtml(recipe.title)}" — but this site had no proper recipe markup,
-        so the ingredients and steps were read off the page and may need tidying. Give it a once-over.</div>`
+    ? `<div class="notice">✓ Added "${escapeHtml(recipe.title)}" — but this site doesn't lay its recipes out
+        in a way we can read cleanly, so the ingredients and steps were picked off the page as best we could.
+        Worth reading through before you cook it.</div>`
     : `<div class="success">✓ Got it — added "${escapeHtml(recipe.title)}"</div>`;
   setTimeout(() => showRecipeDetail(recipe.id), 700);
 }
@@ -1893,10 +1893,12 @@ function jsonLdToRecipe(r) {
   };
   const getStr = v => {
     if (!v) return '';
-    if (typeof v === 'string') return v;
+    // Every string pulled out of a page passes through here, so this is the
+    // one place that needs to turn "&#x27;" back into an apostrophe.
+    if (typeof v === 'string') return decodeEntities(v);
     if (Array.isArray(v)) return v.map(getStr).join(' ');
-    if (typeof v === 'object') return v.name || v.text || v['@value'] || '';
-    return String(v);
+    if (typeof v === 'object') return decodeEntities(v.name || v.text || v['@value'] || '');
+    return decodeEntities(String(v));
   };
   const getImg = v => {
     if (!v) return '';
@@ -1921,7 +1923,8 @@ function jsonLdToRecipe(r) {
     return [];
   })();
   const ingredients = (r.recipeIngredient || []).map(ing => ({
-    amount: '', unit: '', name: typeof ing === 'string' ? ing.trim() : getStr(ing)
+    // Always through getStr, so encoded text gets decoded here too.
+    amount: '', unit: '', name: getStr(ing).trim()
   })).filter(keepIngredient);
 
   // Yield → servings
@@ -3051,7 +3054,24 @@ function addShoppingItem() {
 async function repairInstructions() {
   const splitFixed = [];
   let junkDropped = 0;
+  let textTidied = 0;
   for (const r of state.recipes) {
+    // Stray codes like "&#x27;" where an apostrophe should be, left behind by
+    // pages that encode their text. Tidy every piece of writing on the recipe.
+    const beforeText = [r.title, r.description, r.notes,
+      (r.ingredients || []).map(i => i && i.name).join('|')].join('\u0000');
+    r.title = tidySpacing(r.title || '') || r.title;
+    r.description = tidySpacing(r.description || '');
+    r.notes = tidySpacing(r.notes || '');
+    if (Array.isArray(r.ingredients)) {
+      r.ingredients = r.ingredients.map(i => i && typeof i === 'object'
+        ? Object.assign({}, i, { name: tidySpacing(i.name || ''), unit: tidySpacing(i.unit || '') })
+        : i);
+    }
+    const afterText = [r.title, r.description, r.notes,
+      (r.ingredients || []).map(i => i && i.name).join('|')].join('\u0000');
+    if (afterText !== beforeText) textTidied++;
+
     // Page furniture an importer mistook for an ingredient.
     if (Array.isArray(r.ingredients)) {
       const kept = r.ingredients.filter(keepIngredient);
@@ -3071,10 +3091,10 @@ async function repairInstructions() {
     const joined = tidySpacing(cur.join(' '));
     const renum = splitOnStepNumbers(joined);
     if (renum && renum.length >= 2) {
-      r.instructions = renum.map(s => stripStepPrefix(stripBullet(s))).filter(Boolean);
+      r.instructions = renum.map(s => stripStepPrefix(stripBullet(tidySpacing(s)))).filter(Boolean);
     } else if (cur.length === 1 && cur[0].length > 260) {
       const split = paragraphToSteps(cur[0]);
-      if (split.length > 1) r.instructions = split;
+      r.instructions = (split.length > 1 ? split : cur).map(s => tidySpacing(s)).filter(Boolean);
     } else {
       // Even when the split is fine, the text may carry HTML entities,
       // mojibake or stray bullets.
@@ -3090,10 +3110,10 @@ async function repairInstructions() {
 
   if (refetchable.length && spoonKey()) {
     const ok = confirm(
-      `${refetchable.length} recipe${refetchable.length === 1 ? '' : 's'} still ` +
-      `${refetchable.length === 1 ? 'has' : 'have'} missing or incomplete steps.\n\n` +
-      `Fetch the full versions from Spoonacular? This uses about ${refetchable.length} ` +
-      `of your daily quota (150 a day on the free plan).`
+      `${refetchable.length} recipe${refetchable.length === 1 ? '' : 's'} ` +
+      `${refetchable.length === 1 ? 'is' : 'are'} missing most of the method.\n\n` +
+      `Go and fetch the full versions? It only takes a moment, and it uses a small ` +
+      `part of the day's allowance for looking recipes up.`
     );
     if (ok) {
       try {
@@ -3109,7 +3129,8 @@ async function repairInstructions() {
           }
         }
       } catch (e) {
-        alert('Couldn\'t reach Spoonacular: ' + (e.message || e));
+        console.warn('Recipe lookup failed:', e);
+        alert('Couldn\'t reach the recipe finder just now. Check you\'re online and try again.');
       }
     }
   }
@@ -3118,11 +3139,20 @@ async function repairInstructions() {
   renderRecipes();
 
   const bits = [];
-  if (junkDropped) bits.push(`${junkDropped} non-food ingredient${junkDropped === 1 ? '' : 's'} removed`);
-  if (splitFixed.length) bits.push(`${splitFixed.length} had their steps rebuilt`);
+  if (textTidied) bits.push(textTidied === 1
+    ? `1 recipe had stray symbols cleaned out of its writing`
+    : `${textTidied} recipes had stray symbols cleaned out of their writing`);
+  if (junkDropped) bits.push(junkDropped === 1
+    ? `1 thing that wasn't really an ingredient was removed`
+    : `${junkDropped} things that weren't really ingredients were removed`);
+  if (splitFixed.length) bits.push(splitFixed.length === 1
+    ? `1 recipe had its steps tidied up`
+    : `${splitFixed.length} recipes had their steps tidied up`);
   if (refetched) bits.push(`${refetched} re-fetched in full`);
   const stuck = state.recipes.filter(r => stepsUnusable(r.instructions)).length;
-  if (stuck) bits.push(`${stuck} still without usable steps — those need editing by hand, or re-importing from the original link`);
+  if (stuck) bits.push(stuck === 1
+    ? `1 recipe still has no proper method — you'll need to type it in, or bring it in again from the original page`
+    : `${stuck} recipes still have no proper method — you'll need to type those in, or bring them in again from the original page`);
   alert(bits.length ? 'Done:\n\n• ' + bits.join('\n• ') : 'Nothing needed fixing — your recipes all look healthy.');
 }
 
@@ -3280,18 +3310,23 @@ function authFriendlyError(e) {
     'auth/weak-password': 'Password needs to be at least 6 characters.',
     'auth/too-many-requests': 'Too many attempts. Wait a minute and try again.',
     'auth/network-request-failed': 'Network problem — check your connection and try again.',
-    'auth/operation-not-allowed': 'This sign-in method isn\'t enabled in Firebase yet. See AUTH-SETUP.md.',
+    'auth/operation-not-allowed': 'This way of signing in hasn\'t been switched on yet.',
+    'auth/invalid-email': 'That doesn\'t look like an email address.',
+    'auth/user-disabled': 'That account has been turned off.',
   };
-  return map[code] || ((e && e.message) || String(e));
+  if (map[code]) return map[code];
+  // Anything unexpected: the detail goes to the console for whoever maintains
+  // the app, and the person gets something they can act on.
+  console.warn('Sign-in error:', code, e);
+  return 'Something went wrong signing in. Try again in a moment.';
 }
 
-// Apple sign-in failures are config problems more often than user error —
-// show the raw Firebase code so they're diagnosable.
+// Apple sign-in failures are usually a setup problem rather than anything the
+// person did, so the details go to the console and they get a plain message.
 function appleError(e) {
-  const code = (e && e.code) || '';
-  return 'Apple sign-in failed' + (code ? ' (' + code + ')' : '') + ': '
-    + ((e && e.message) || String(e))
-    + ' — if this mentions an invalid credential, double-check the Apple provider settings in Firebase (Services ID, Team ID, Key ID, .p8 key). See AUTH-SETUP.md step 3.';
+  console.warn('Apple sign-in failed:', (e && e.code) || '', e);
+  if (e && e.code === 'auth/popup-closed-by-user') return 'Sign-in was cancelled.';
+  return 'Couldn\'t sign in with Apple just now. Try again, or use your email and password instead.';
 }
 
 function showAuthStatus(msg, isError) {
@@ -3397,7 +3432,7 @@ async function signInWithAppleNative() {
       nonce: hashedNonce,
     });
     const resp = result && result.response;
-    if (!resp || !resp.identityToken) throw new Error('Apple didn\'t return an identity token.');
+    if (!resp || !resp.identityToken) throw new Error('Apple sign-in didn\'t complete. Try again.');
     const provider = new firebase.auth.OAuthProvider('apple.com');
     const credential = provider.credential({ idToken: resp.identityToken, rawNonce: rawNonce });
     const cred = await _auth.signInWithCredential(credential);
@@ -3442,7 +3477,8 @@ async function createHousehold() {
     renderSyncModal();
   } catch (e) {
     console.error('createHousehold failed', e);
-    alert('Couldn\'t create the household: ' + (e.message || e));
+    console.warn('Create household failed:', e);
+    alert('Couldn\'t set up sharing just now. Check you\'re online and try again.');
   }
 }
 
@@ -3484,7 +3520,8 @@ async function joinHouseholdByCode(id) {
     renderSyncModal();
   } catch (e) {
     console.error('joinHousehold failed', e);
-    alert('Couldn\'t join: ' + (e.message || e));
+    console.warn('Join failed:', e);
+    alert('Couldn\'t join just now. Check the code and that you\'re online, then try again.');
   }
 }
 
@@ -3511,7 +3548,8 @@ async function sendInvite() {
     renderSyncModal();
   } catch (e) {
     console.error('sendInvite failed', e);
-    alert('Couldn\'t send the invite: ' + (e.message || e));
+    console.warn('Invite failed:', e);
+    alert('Couldn\'t send that invite just now. Check you\'re online and try again.');
   }
 }
 
@@ -3520,7 +3558,7 @@ async function cancelInvite(id) {
     await _db.collection('invites').doc(id).delete();
     await refreshInvites();
     renderSyncModal();
-  } catch (e) { alert('Couldn\'t cancel: ' + (e.message || e)); }
+  } catch (e) { console.warn('Cancel invite failed:', e); alert('Couldn\'t cancel that just now. Try again in a moment.'); }
 }
 
 async function acceptInvite(id) {
@@ -3538,7 +3576,8 @@ async function acceptInvite(id) {
     renderSyncModal();
   } catch (e) {
     console.error('acceptInvite failed', e);
-    alert('Couldn\'t accept the invite: ' + (e.message || e));
+    console.warn('Accept invite failed:', e);
+    alert('Couldn\'t accept that invite just now. Try again in a moment.');
   }
 }
 
@@ -3547,7 +3586,7 @@ async function declineInvite(id) {
     await _db.collection('invites').doc(id).delete();
     await refreshInvites();
     renderSyncModal();
-  } catch (e) { alert('Couldn\'t decline: ' + (e.message || e)); }
+  } catch (e) { console.warn('Decline invite failed:', e); alert('Couldn\'t decline that just now. Try again in a moment.'); }
 }
 
 async function leaveCurrentHouseholdQuietly() {
@@ -3647,7 +3686,7 @@ function renderSyncModal() {
       <div class="modal-backdrop" onclick="if(event.target===this) closeSyncModal()">
         <div class="modal">
           <h3>Account</h3>
-          <p class="text-muted">Accounts aren't turned on yet. See <strong>AUTH-SETUP.md</strong>.</p>
+          <p class="text-muted">Accounts and sharing haven't been switched on for this app yet.</p>
           <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
             <button class="btn-secondary btn-small" onclick="closeSyncModal()">Close</button>
           </div>
@@ -3802,11 +3841,15 @@ const MOJIBAKE = [
 ];
 function decodeEntities(s) {
   let t = String(s || '');
-  if (t.indexOf('&') !== -1) {
+  // Some sites encode their text twice, so "&amp;#x27;" needs two passes to
+  // become an apostrophe. Loop until it stops changing.
+  for (let i = 0; i < 3 && t.indexOf('&') !== -1; i++) {
     // A textarea decodes entities without executing anything.
     const el = document.createElement('textarea');
     el.innerHTML = t;
-    t = el.value;
+    const next = el.value;
+    if (next === t) break;
+    t = next;
   }
   if (t.indexOf('Ã') !== -1 || t.indexOf('Â') !== -1 || t.indexOf('â€') !== -1) {
     for (const [bad, good] of MOJIBAKE) t = t.split(bad).join(good);
@@ -4097,7 +4140,7 @@ async function loadDailyPick() {
   }
   const key = spoonKey();
   if (!key) {
-    container.innerHTML = `<div class="notice">Recipe discovery isn't set up yet. See <strong>SPOONACULAR-SETUP.md</strong> to turn it on (takes 2 minutes).</div>`;
+    container.innerHTML = `<div class="notice">Recipe suggestions aren't switched on yet. Whoever set the app up can turn them on in a couple of minutes.</div>`;
     return;
   }
   const today = new Date().toISOString().slice(0,10);
@@ -4133,7 +4176,7 @@ async function runDiscoverSearch() {
   const results = document.getElementById('discoverResults');
   if (!results) return;
   const key = spoonKey();
-  if (!key) { alert("Recipe discovery isn't set up yet."); return; }
+  if (!key) { alert("Recipe suggestions aren't switched on yet."); return; }
   const q = document.getElementById('discoverInput').value.trim();
   if (!q) return;
   results.innerHTML = '<div class="discover-empty"><span class="spinner"></span> Finding recipes...</div>';
@@ -4292,7 +4335,7 @@ let _previewRecipe = null;
 
 async function previewSpoonacularRecipe(spoonId) {
   const key = spoonKey();
-  if (!key) { alert("Recipe discovery isn't set up yet."); return; }
+  if (!key) { alert("Recipe suggestions aren't switched on yet."); return; }
   // Show a loading state inside the detail view immediately
   window._detailReturnTo = 'home';
   document.getElementById('detailContent').innerHTML = '<div class="notice" style="margin-top:16px;"><span class="spinner"></span> Loading recipe...</div>';
@@ -4302,7 +4345,9 @@ async function previewSpoonacularRecipe(spoonId) {
     _previewRecipe = recipe;
     renderRecipeDetail(recipe, 'preview');
   } catch (e) {
-    document.getElementById('detailContent').innerHTML = '<div class="error" style="margin-top:16px;">Couldn\'t load that recipe: ' + escapeHtml(e.message || String(e)) + '</div>';
+    console.warn('Recipe preview failed:', e);
+    document.getElementById('detailContent').innerHTML =
+      '<div class="error" style="margin-top:16px;">Couldn\'t load that recipe just now. Check you\'re online and try again.</div>';
   }
 }
 
@@ -4320,7 +4365,7 @@ function savePreviewRecipe() {
 
 async function saveSpoonacularRecipe(spoonId) {
   const key = spoonKey();
-  if (!key) { alert("Recipe discovery isn't set up yet."); return; }
+  if (!key) { alert("Recipe suggestions aren't switched on yet."); return; }
   try {
     const recipe = await fetchSpoonacularRecipe(spoonId);
     recipe.id = uid();
@@ -4329,7 +4374,8 @@ async function saveSpoonacularRecipe(spoonId) {
     save();
     alert(`Saved "${recipe.title}" to your recipe book!`);
   } catch (e) {
-    alert("Couldn't save: " + (e.message || e));
+    console.warn('Save failed:', e);
+    alert("Couldn't save that recipe just now. Check you're online and try again.");
   }
 }
 
@@ -4395,18 +4441,18 @@ function renderAIPlannerForm() {
   if (!spoonKey()) {
     notice.innerHTML = `
       <div class="error" style="margin-top:16px; margin-bottom:0;">
-        <strong>Needs a Spoonacular key.</strong> Meal plans are built from the
-        Spoonacular recipe database, same as the Home tab. Add your key to
-        <code>spoonacular-config.js</code> — see SPOONACULAR-SETUP.md.
+        <strong>Recipe finding isn't switched on yet.</strong>
+        Meal plans are built from the same recipe collection the Home tab
+        searches, and that part hasn't been set up. Whoever set the app up can
+        turn it on — see the setup notes that came with it.
       </div>`;
   } else if (!isAIConfigured()) {
     notice.innerHTML = `
       <div class="notice" style="margin-top:16px; margin-bottom:0;">
-        <strong>Working without AI.</strong> Plans are built straight from
-        Spoonacular using the settings below, and common phrases in your notes
-        ("low fat", "vegetarian", "quick") are picked up too. Add an OpenAI key
-        to <code>ai-config.js</code> and it'll understand the whole brief
-        properly — see AI-SETUP.md.
+        <strong>Planning from your settings.</strong> It'll pick up common
+        phrases in your notes — "low fat", "vegetarian", "quick" — along with
+        everything you choose below. The optional smart helper, which reads a
+        longer note properly, isn't switched on.
       </div>`;
   } else {
     notice.innerHTML = '';
@@ -4608,14 +4654,23 @@ async function planSearches(prefs, days) {
     prefs.avoid ? `\nMust avoid: ${prefs.avoid}` : '',
   ].filter(Boolean).join('\n');
 
-  const raw = await callOpenAI(
-    [{ role: 'system', content: AI_SEARCH_SYSTEM }, { role: 'user', content: lines }],
-    AI_SEARCH_SCHEMA
-  );
+  let raw;
+  try {
+    raw = await callOpenAI(
+      [{ role: 'system', content: AI_SEARCH_SYSTEM }, { role: 'user', content: lines }],
+      AI_SEARCH_SCHEMA
+    );
+  } catch (e) {
+    // The smart reading of your notes is a bonus, not a requirement. If it
+    // isn't available we plan from the settings instead of showing an error.
+    console.warn('AI brief reading unavailable:', e.message);
+    const local = localInterpretBrief(prefs);
+    local.aiUnavailable = true;
+    return local;
+  }
   const searches = (Array.isArray(raw.searches) ? raw.searches : [])
     .filter(s => s && prefs.slots.includes(s.slot))
     .slice(0, 5);
-  // If the model gave us nothing usable, fall back rather than fail.
   if (!searches.length) return localInterpretBrief(prefs);
   return { interpretation: String(raw.interpretation || ''), searches };
 }
@@ -4667,9 +4722,9 @@ async function searchWithRelaxation(search, slot, count) {
 
   for (let attempt = 0; attempt <= RELAXATION_ORDER.length; attempt++) {
     const resp = await fetch(buildSpoonUrl(current, slot, count));
-    if (resp.status === 402) throw new Error('QUOTA');
-    if (resp.status === 401) throw new Error('SPOON_KEY');
-    if (!resp.ok) throw new Error(`Spoonacular returned an error (${resp.status}).`);
+    if (resp.status === 402) throw new Error('ERR_LIMIT');
+    if (resp.status === 401 || resp.status === 403) throw new Error('ERR_SETUP');
+    if (!resp.ok) throw new Error('ERR_SERVICE');
     const data = await resp.json();
     const results = (data.results || []).filter(r => r && r.id && r.title);
     if (results.length >= 2 || attempt === RELAXATION_ORDER.length) {
@@ -4837,10 +4892,18 @@ async function arrangeWeek(bySlot, prefs, days, extraInstruction) {
   }
   if (extraInstruction) lines.push(`\nAdditional instruction from the user: ${extraInstruction}`);
 
-  const raw = await callOpenAI(
-    [{ role: 'system', content: AI_ARRANGE_SYSTEM }, { role: 'user', content: lines.join('\n') }],
-    AI_ARRANGE_SCHEMA
-  );
+  let raw;
+  try {
+    raw = await callOpenAI(
+      [{ role: 'system', content: AI_ARRANGE_SYSTEM }, { role: 'user', content: lines.join('\n') }],
+      AI_ARRANGE_SCHEMA
+    );
+  } catch (e) {
+    console.warn('AI week arrangement unavailable:', e.message);
+    const local = localArrange(bySlot, prefs, days);
+    local.aiUnavailable = true;
+    return local;
+  }
   if (!raw || !Array.isArray(raw.plan) || !raw.plan.length) return localArrange(bySlot, prefs, days);
   return raw;
 }
@@ -4851,7 +4914,7 @@ async function arrangeWeek(bySlot, prefs, days, extraInstruction) {
 
 async function callOpenAI(messages, schema) {
   const key = aiKey();
-  if (!key) throw new Error('NO_KEY');
+  if (!key) throw new Error('ERR_NOHELPER');
   const base = (aiCfg().baseUrl || 'https://api.openai.com/v1').replace(/\/$/, '');
 
   const controller = new AbortController();
@@ -4871,35 +4934,34 @@ async function callOpenAI(messages, schema) {
     });
   } catch (e) {
     clearTimeout(timeout);
-    if (e.name === 'AbortError') throw new Error('That took too long and timed out. Try again, or plan fewer meal slots at once.');
+    if (e.name === 'AbortError') throw new Error('That took longer than expected, so it gave up waiting. Try again, or plan fewer meals at once.');
     // In the installed iOS app the request goes out of a WKWebView, which can
     // have the call blocked before it ever leaves the phone. Worth naming,
     // because "check your connection" sends people down the wrong path.
-    if (isNativeApp()) {
-      throw new Error('Couldn\'t reach OpenAI from inside the app. If the web version works but this doesn\'t, the request is being blocked rather than failing — see the iOS note in AI-SETUP.md.');
-    }
-    throw new Error('Couldn\'t reach OpenAI. Check your internet connection and try again.');
+    throw new Error('Couldn\'t connect. Check you\'re online and try again.');
   }
   clearTimeout(timeout);
 
   if (!resp.ok) {
     let detail = '';
     try { detail = (await resp.json()).error?.message || ''; } catch (e) { /* body wasn't JSON */ }
-    if (resp.status === 401) throw new Error('OpenAI rejected the API key. Check the key in ai-config.js is current and pasted in full.');
-    if (resp.status === 429) throw new Error('OpenAI says you\'re out of quota or going too fast. Check your billing at platform.openai.com and try again in a minute.');
-    if (resp.status === 404) throw new Error(`The model "${aiCfg().model}" isn't available on your account. Try "gpt-4o-mini" in ai-config.js.`);
-    throw new Error(detail || `OpenAI returned an error (${resp.status}).`);
+    // Kept plain: whatever went wrong, the planner carries on without the
+    // smart reading, so this text is only ever a passing note.
+    if (resp.status === 401 || resp.status === 403) throw new Error('The smart helper isn\'t set up properly.');
+    if (resp.status === 429) throw new Error('The smart helper is busy or has hit its limit for now.');
+    if (resp.status === 404) throw new Error('The smart helper isn\'t available on this account.');
+    throw new Error('The smart helper had a problem.');
   }
 
   const data = await resp.json();
   const choice = data.choices && data.choices[0];
   if (choice && choice.finish_reason === 'length') {
-    throw new Error('The reply got cut off before it was finished. Try planning fewer meal slots at once.');
+    throw new Error('The answer came back unfinished. Try planning fewer meals at once.');
   }
   const text = choice && choice.message && choice.message.content;
-  if (!text) throw new Error('OpenAI sent back an empty reply. Try again.');
+  if (!text) throw new Error('Nothing came back. Try again.');
   try { return JSON.parse(text); }
-  catch (e) { throw new Error('OpenAI\'s reply wasn\'t readable. Try again.'); }
+  catch (e) { throw new Error('The answer came back garbled. Try again.'); }
 }
 
 /* ============================================================
@@ -4911,7 +4973,7 @@ async function generateAIMealPlan(extraInstruction) {
   const btn = document.getElementById('aiGenerateBtn');
 
   if (!spoonKey()) {
-    status.innerHTML = '<div class="error">No Spoonacular key set up — see SPOONACULAR-SETUP.md.</div>';
+    status.innerHTML = '<div class="error">Recipe finding isn\'t switched on yet, so there\'s nothing to build a plan from.</div>';
     return;
   }
   const prefs = readAIPrefsFromForm();
@@ -4925,7 +4987,8 @@ async function generateAIMealPlan(extraInstruction) {
   startCookingPhraseLoop(status, AI_PLANNING_PHRASES);
 
   try {
-    const { interpretation, searches } = await planSearches(prefs, days);
+    const searchMeta = await planSearches(prefs, days);
+    const { interpretation, searches } = searchMeta;
     const { bySlot, relaxed } = await gatherCandidates(searches, prefs);
 
     const total = Object.values(bySlot).reduce((n, l) => n + l.length, 0);
@@ -4934,9 +4997,9 @@ async function generateAIMealPlan(extraInstruction) {
       btn.disabled = false;
       status.innerHTML = `
         <div class="error">
-          <strong>Spoonacular didn't have anything matching.</strong> Even after
-          loosening the search it came back empty. Try a broader brief, or
-          fewer restrictions in the avoid list.
+          <strong>Nothing matched.</strong> Even after loosening the search,
+          no recipes came back. Try asking for something a bit broader, or
+          taking a couple of things off the avoid list.
         </div>`;
       return;
     }
@@ -4946,15 +5009,20 @@ async function generateAIMealPlan(extraInstruction) {
     status.innerHTML = '';
     btn.disabled = false;
 
-    window._aiPlanDraft = normalizePlan(arranged, bySlot, prefs, days, { interpretation, relaxed });
+    window._aiPlanDraft = normalizePlan(arranged, bySlot, prefs, days, {
+      interpretation, relaxed,
+      aiUnavailable: !!(searchMeta.aiUnavailable || arranged.aiUnavailable),
+    });
     openAIPlanPreview();
   } catch (e) {
     stopCookingPhraseLoop();
     btn.disabled = false;
     let msg = e.message;
-    if (msg === 'QUOTA') msg = 'Spoonacular\'s daily quota is used up. It resets at midnight UTC — or upgrade your plan.';
-    if (msg === 'SPOON_KEY') msg = 'Spoonacular rejected the key in spoonacular-config.js. Check it\'s current.';
-    if (msg === 'NO_KEY') msg = 'No OpenAI key configured.';
+    // These codes are internal only; every one is swapped for plain words here.
+    if (msg === 'ERR_LIMIT') msg = 'You\'ve used up today\'s recipe searches. They come back overnight — try again tomorrow, or plan fewer meals at a time.';
+    if (msg === 'ERR_SETUP') msg = 'The recipe finder isn\'t set up properly, so it can\'t look anything up at the moment.';
+    if (msg === 'ERR_SERVICE') msg = 'The recipe finder isn\'t responding just now. Try again in a few minutes.';
+    if (msg === 'ERR_NOHELPER') msg = 'The smart helper isn\'t set up.';
     status.innerHTML = `<div class="error">${escapeHtml(msg)}</div>`;
   }
 }
@@ -5014,6 +5082,7 @@ function normalizePlan(arranged, bySlot, prefs, days, meta) {
     summary: String(arranged.summary || ''),
     interpretation: meta.interpretation || '',
     relaxed: meta.relaxed || [],
+    aiUnavailable: !!meta.aiUnavailable,
     plan: kept,
     recipes: [...usedIds].map(id => byId.get(id)),
     // Everything Spoonacular gave us, kept so "Refine" can rearrange without
@@ -5084,6 +5153,12 @@ function renderAIPlanPreview() {
       ${leftoverCount ? `<span class="badge">${leftoverCount} leftover meal${leftoverCount === 1 ? '' : 's'}</span>` : ''}
     </p>
 
+    ${draft.aiUnavailable ? `
+      <div class="notice" style="font-size:12.5px;">
+        The smart helper wasn't available, so this week was put together from
+        your settings and the obvious phrases in your notes. Everything below
+        still works exactly the same.
+      </div>` : ''}
     ${draft.relaxed.length ? `
       <div class="notice" style="font-size:12.5px;">
         Nothing matched your brief exactly, so the search was loosened on
@@ -5091,8 +5166,9 @@ function renderAIPlanPreview() {
       </div>` : ''}
     ${emptySlots > 0 ? `
       <div class="notice" style="font-size:12.5px;">
-        ${emptySlots} slot${emptySlots === 1 ? '' : 's'} left empty — Spoonacular
-        didn't have enough that fitted. Fill them by hand, or try a broader brief.
+        ${emptySlots} meal${emptySlots === 1 ? '' : 's'} left empty — there weren't
+        enough recipes that fitted what you asked for. Add those yourself, or try
+        asking for something a bit broader.
       </div>` : ''}
 
     ${dayHtml || '<div class="error">Nothing could be planned. Try a broader brief.</div>'}
@@ -5141,7 +5217,8 @@ async function refineAIPlan() {
   } catch (e) {
     stopCookingPhraseLoop();
     input.disabled = false;
-    status.innerHTML = `<div class="error" style="margin-top:8px;">${escapeHtml(e.message)}</div>`;
+    console.warn('Refine failed:', e);
+    status.innerHTML = `<div class="error" style="margin-top:8px;">Couldn't rework the week just now — ${escapeHtml(e.message)} Your plan above is unchanged.</div>`;
   }
 }
 
