@@ -1813,6 +1813,7 @@ function parseRecipeFromHtml(html, sourceUrl) {
   const text = readableTextFrom(doc);
   if (text) {
     const guessed = parsePastedRecipe(text);
+    if (guessed) guessed.instructions = (guessed.instructions || []).filter(looksLikeInstruction);
     if (guessed && guessed.ingredients.length >= 3 && guessed.instructions.length >= 1) {
       guessed.roughParse = true;
       return guessed;
@@ -1832,6 +1833,7 @@ function microdataToRecipe(doc) {
   let instructions = pick('[itemprop="recipeInstructions"] li, [itemprop="recipeInstructions"] p');
   if (!instructions.length) instructions = pick('[itemprop="recipeInstructions"]');
   if (instructions.length === 1) instructions = paragraphToSteps(instructions[0]);
+  instructions = instructions.filter(looksLikeInstruction);
   if (ingredients.length < 2 || !instructions.length) return null;
 
   const titleNode = scope.querySelector('[itemprop="name"]');
@@ -1861,13 +1863,23 @@ function readableTextFrom(doc) {
   const clone = doc.cloneNode(true);
   clone.querySelectorAll('script, style, noscript, nav, header, footer, aside, form, iframe')
     .forEach(n => n.remove());
+  // Share bars, comment threads and "you may also like" carousels are usually
+  // labelled as such, and each one otherwise contributes a handful of
+  // one-word "steps".
+  clone.querySelectorAll('[class*="share" i], [class*="social" i], [class*="comment" i], [class*="related" i], [class*="sidebar" i], [class*="newsletter" i], [class*="subscribe" i], [class*="breadcrumb" i], [class*="advert" i], [id*="comment" i], [id*="share" i], [id*="sidebar" i]')
+    .forEach(n => n.remove());
   const body = clone.body || clone;
   // Keep block boundaries as newlines so the parser can see structure.
   body.querySelectorAll('li, p, h1, h2, h3, h4, br, div').forEach(n => {
     n.insertAdjacentText && n.insertAdjacentText('afterend', '\n');
   });
-  return (body.textContent || '')
-    .split(/\n+/).map(l => l.replace(/[ \t]+/g, ' ').trim()).filter(Boolean).join('\n');
+  const lines = (body.textContent || '')
+    .split(/\n+/).map(l => l.replace(/[ \t]+/g, ' ').trim()).filter(Boolean);
+  // Everything past the nutrition panel / comments / "related recipes" is the
+  // rest of the website, not the recipe.
+  const END = /^(nutrition( facts| information)?|comments?|\d+ comments?|leave a (comment|review)|reviews?|related( recipes)?|you (may|might) also like|more recipes|reader interactions|primary sidebar|footer|newsletter|subscribe)\b/i;
+  const stop = lines.findIndex(l => END.test(l));
+  return (stop > 5 ? lines.slice(0, stop) : lines).join('\n');
 }
 
 function findRecipeNode(node) {
@@ -3091,14 +3103,17 @@ async function repairInstructions() {
     const joined = tidySpacing(cur.join(' '));
     const renum = splitOnStepNumbers(joined);
     if (renum && renum.length >= 2) {
-      r.instructions = renum.map(s => stripStepPrefix(stripBullet(tidySpacing(s)))).filter(Boolean);
+      r.instructions = renum.map(s => stripStepPrefix(stripBullet(tidySpacing(s))))
+        .filter(s => s && looksLikeInstruction(s));
     } else if (cur.length === 1 && cur[0].length > 260) {
       const split = paragraphToSteps(cur[0]);
-      r.instructions = (split.length > 1 ? split : cur).map(s => tidySpacing(s)).filter(Boolean);
+      r.instructions = (split.length > 1 ? split : cur).map(s => tidySpacing(s))
+        .filter(s => s && looksLikeInstruction(s));
     } else {
       // Even when the split is fine, the text may carry HTML entities,
       // mojibake or stray bullets.
-      r.instructions = cur.map(s => stripStepPrefix(stripBullet(tidySpacing(s)))).filter(Boolean);
+      r.instructions = cur.map(s => stripStepPrefix(stripBullet(tidySpacing(s))))
+        .filter(s => s && looksLikeInstruction(s));
     }
     if (r.instructions.join(' ') !== before) splitFixed.push(r.title);
   }
@@ -3962,8 +3977,8 @@ function htmlToSteps(html) {
   const tmp = document.createElement('div');
   tmp.innerHTML = withBreaks;
   const raw = tmp.textContent || '';
-  let steps = raw.split(/\r?\n+/).map(s => s.trim()).filter(Boolean);
-  if (steps.length < 2) steps = splitNumbered(raw.replace(/\s+/g, ' ').trim());
+  let steps = raw.split(/\r?\n+/).map(s => trimTrailingJunk(s.trim())).filter(Boolean);
+  if (steps.length < 2) steps = splitNumbered(trimTrailingJunk(raw.replace(/\s+/g, ' ').trim()));
   return steps.map(s => stripStepPrefix(tidySpacing(s))).filter(Boolean);
 }
 
@@ -3974,10 +3989,79 @@ function htmlToSteps(html) {
 /* Measure a step list so two versions of the same recipe can be compared.
    `chars` is the one that matters most: a version with far less text than
    another is missing content, however tidily it's broken up. */
+/* Recipe pages are surrounded by things that look like short lines of text but
+   aren't cooking: share buttons, social network names, comment prompts,
+   "Related recipes". When we read a page that has no proper recipe data, those
+   come along for the ride and turn up as steps. */
+const NOT_A_STEP = new RegExp('^(' + [
+  // Social and sharing
+  'instagram', 'facebook', 'x', 'twitter', 'pinterest', 'pin it', 'tiktok',
+  'youtube', 'snapchat', 'threads', 'reddit', 'whatsapp', 'linkedin', 'flipboard',
+  'share', 'share this', 'share it', 'share on \\w+', 'tweet', 'email', 'email this',
+  'follow', 'follow us', 'follow me', 'follow along', 'like us', 'subscribe',
+  'newsletter', 'sign up', 'log ?in', 'join',
+  // Page furniture
+  'print', 'print recipe', 'save', 'save recipe', 'saved', 'bookmark',
+  'jump to recipe', 'jump to video', 'jump to', 'skip to content', 'watch', 'video',
+  'advertisement', 'ad', 'sponsored', 'continue reading', 'read more', 'show more',
+  'related', 'related recipes', 'more recipes', 'you may also like', 'you might also like',
+  'comments?', 'leave a comment', 'leave a review', 'reviews?', 'rate', 'rate this',
+  'rate this recipe', 'write a review', 'questions?', 'faq',
+  // Recipe-card labels that aren't method
+  'ingredients?', 'instructions?', 'directions', 'method', 'steps', 'notes?',
+  'equipment', 'nutrition', 'nutrition facts', 'nutrition information',
+  'prep time', 'cook time', 'total time', 'servings?', 'yield', 'course', 'cuisine',
+  'calories', 'author', 'tags?', 'categor(y|ies)', 'difficulty', 'keyword',
+  // Site chrome
+  'home', 'menu', 'search', 'shop', 'about', 'about us', 'contact', 'privacy',
+  'privacy policy', 'terms', 'cookies?', 'accessibility', 'sitemap',
+].join('|') + ')[\\s.!:]*$', 'i');
+
+/* Single words that are page furniture rather than cooking. Used to shave a
+   trailing run of them off a block of text — "...Serve. Facebook Instagram X
+   Pinterest Share Print" — which otherwise gets glued onto the last step. */
+const JUNK_WORDS = new Set(['facebook', 'instagram', 'x', 'twitter', 'pinterest', 'pin',
+  'tiktok', 'youtube', 'snapchat', 'threads', 'reddit', 'whatsapp', 'linkedin', 'flipboard',
+  'share', 'shares', 'tweet', 'email', 'print', 'save', 'saved', 'bookmark', 'subscribe',
+  'newsletter', 'follow', 'comments', 'comment', 'reviews', 'review', 'rate', 'related',
+  'advertisement', 'ad', 'sponsored', 'home', 'menu', 'search', 'shop', 'about', 'contact',
+  'privacy', 'terms', 'cookies', 'it', 'us', 'this', 'more', 'recipe', 'recipes']);
+
+function trimTrailingJunk(text) {
+  const words = String(text || '').trim().split(/\s+/);
+  let end = words.length;
+  let removed = 0;
+  while (end > 0 && removed < 30) {
+    const w = words[end - 1].replace(/[^A-Za-z]/g, '').toLowerCase();
+    // Stop at the first real word, and never chew into a proper sentence.
+    if (!w || !JUNK_WORDS.has(w)) break;
+    end--; removed++;
+  }
+  // Only trust it when it actually looks like a run of link text, not one
+  // stray word that happens to be on the list.
+  return removed >= 2 ? words.slice(0, end).join(' ') : String(text || '');
+}
+
+function looksLikeInstruction(s) {
+  const t = String(s || '').trim();
+  if (t.length < 3) return false;
+  if (NOT_A_STEP.test(t)) return false;
+  if (/^@|^https?:\/\/|^www\./i.test(t)) return false;      // handles and links
+  if (!/[a-z]/.test(t)) return false;                        // ALL-CAPS headings
+  // A one-word step is fine — "Chop.", "Serve.", "Enjoy!" all are. Only reject
+  // it when the word is page furniture. Listing every cooking verb would be a
+  // losing game; listing the handful of website words is not.
+  const words = t.replace(/[^\w\s]/g, ' ').trim().split(/\s+/);
+  if (words.length === 1 && JUNK_WORDS.has(words[0].toLowerCase())) return false;
+  return true;
+}
+
 function stepsQuality(steps) {
+  // Junk is stripped before anything is measured, so a version padded with
+  // share buttons can't win on length.
   const clean = (steps || [])
     .map(s => tidySpacing(s))
-    .filter(s => s && s.length > 2 && !/^(ingredients?|instructions?|directions?|advertisement)$/i.test(s));
+    .filter(s => s && looksLikeInstruction(s));
   return {
     steps: clean,
     count: clean.length,
@@ -4002,7 +4086,7 @@ function pickBestSteps(candidates) {
 /* One unbroken wall of text is useless at the hob. Break it into steps you can
    actually follow and tick off. */
 function paragraphToSteps(text) {
-  const t = tidySpacing(text);
+  const t = trimTrailingJunk(tidySpacing(text));
 
   // Numbering is the author's own step boundaries, so it always wins — even on
   // a short paragraph, and before any sentence guessing.
@@ -4079,7 +4163,7 @@ function spoonSteps(r) {
 
   let best = pickBestSteps(candidates);
   if (best.length === 1) best = paragraphToSteps(best[0]);
-  return best.map(stripStepPrefix).filter(Boolean);
+  return best.map(stripStepPrefix).filter(s => s && looksLikeInstruction(s));
 }
 
 /* Should the original site's steps replace Spoonacular's? Only when they're
