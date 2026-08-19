@@ -1875,7 +1875,7 @@ function microdataToRecipe(doc) {
     category: 'Other',
     tags: [],
     prepTime: 0, cookTime: 0, servings,
-    ingredients: ingredients.map(name => ({ amount: '', unit: '', name })).filter(keepIngredient),
+    ingredients: ingredients.map(splitIngredientLine).filter(keepIngredient),
     instructions,
     notes: '', sourceUrl: '', favorite: false,
   };
@@ -1959,8 +1959,9 @@ function jsonLdToRecipe(r) {
     return [];
   })();
   const ingredients = (r.recipeIngredient || []).map(ing => ({
-    // Always through getStr, so encoded text gets decoded here too.
-    amount: '', unit: '', name: getStr(ing).trim()
+    // Always through getStr, so encoded text gets decoded here too, then
+    // split so the shopping list has something to work with.
+    ...splitIngredientLine(getStr(ing))
   })).filter(keepIngredient);
 
   // Yield → servings
@@ -2162,7 +2163,7 @@ function parsePastedRecipe(text) {
     if (mode === 'ingredients') {
       // Strip leading bullet markers ("- ", "* ", "• ") but preserve amount numbers
       const clean = line.replace(/^[-*•]\s+/, '').trim();
-      if (clean) ingredients.push({ amount: '', unit: '', name: clean });
+      if (clean) ingredients.push(splitIngredientLine(clean));
     } else if (mode === 'instructions') {
       // Strip leading "1. ", "2) ", "- ", "• "
       const clean = line.replace(/^(\d+[.)]\s+|[-*•]\s+)/, '').trim();
@@ -3208,6 +3209,7 @@ async function repairInstructions() {
   const splitFixed = [];
   let junkDropped = 0;
   let textTidied = 0;
+  let quantitiesFound = 0;
   for (const r of state.recipes) {
     // Stray codes like "&#x27;" where an apostrophe should be, left behind by
     // pages that encode their text. Tidy every piece of writing on the recipe.
@@ -3224,6 +3226,13 @@ async function repairInstructions() {
     const afterText = [r.title, r.description, r.notes,
       (r.ingredients || []).map(i => i && i.name).join('|')].join('\u0000');
     if (afterText !== beforeText) textTidied++;
+
+    // Ingredients stored as one whole line, with the amount buried in the
+    // name. Splitting them is what lets the shopping list add them up.
+    if (ingredientsUnsplit(r.ingredients)) {
+      r.ingredients = r.ingredients.map(i => Object.assign({}, i, splitIngredientLine(i.name)));
+      quantitiesFound++;
+    }
 
     // Page furniture an importer mistook for an ingredient.
     if (Array.isArray(r.ingredients)) {
@@ -3311,6 +3320,58 @@ async function repairInstructions() {
     }
   }
 
+  // Anything still in a poor state, that couldn't be refreshed from the
+  // recipe finder, can be read through properly instead. This only rearranges
+  // what the recipe already says — it can't put back writing that is gone.
+  const messy = state.recipes.filter(r =>
+    !r.spoonId && (stepsUnusable(r.instructions) || ingredientsUnsplit(r.ingredients)));
+  let reread = 0;
+
+  if (messy.length && isAIConfigured()) {
+    const ok = confirm(
+      `${messy.length} recipe${messy.length === 1 ? '' : 's'} ` +
+      `${messy.length === 1 ? 'is' : 'are'} still untidy — muddled steps, or ` +
+      `ingredients with no amounts separated out.\n\n` +
+      `Read ${messy.length === 1 ? 'it' : 'them'} through and sort ${messy.length === 1 ? 'it' : 'them'} out? ` +
+      `Only what the recipe already says is used — nothing is added or made up.`
+    );
+    if (ok) {
+      for (const r of messy) {
+        try {
+          const asText = [
+            r.title,
+            '',
+            'Ingredients:',
+            ...(r.ingredients || []).map(i =>
+              [i.amount, i.unit, i.name].filter(Boolean).join(' ')),
+            '',
+            'Instructions:',
+            ...(r.instructions || []),
+            r.notes ? '\nNotes:\n' + r.notes : '',
+          ].join('\n').slice(0, 24000);
+
+          const parsed = await callOpenAI([
+            { role: 'system', content: AI_PASTE_SYSTEM },
+            { role: 'user', content: asText },
+          ], AI_PASTE_SCHEMA);
+          if (!parsed || !parsed.found) continue;
+          const fresh = aiPasteToRecipe(parsed);
+          if (!fresh.ingredients.length) continue;
+          // Only the parts we were trying to fix; everything else is left be.
+          r.ingredients = fresh.ingredients;
+          if (fresh.instructions.length) r.instructions = fresh.instructions;
+          if (fresh.servings > 1 && (!r.servings || r.servings === 1)) r.servings = fresh.servings;
+          if (fresh.prepTime && !r.prepTime) r.prepTime = fresh.prepTime;
+          if (fresh.cookTime && !r.cookTime) r.cookTime = fresh.cookTime;
+          reread++;
+        } catch (e) {
+          console.warn('Could not re-read recipe:', r.title, e.message);
+          break;   // usually means it's unavailable; no point trying the rest
+        }
+      }
+    }
+  }
+
   save();
   renderRecipes();
 
@@ -3318,6 +3379,12 @@ async function repairInstructions() {
   if (textTidied) bits.push(textTidied === 1
     ? `1 recipe had stray symbols cleaned out of its writing`
     : `${textTidied} recipes had stray symbols cleaned out of their writing`);
+  if (quantitiesFound) bits.push(quantitiesFound === 1
+    ? `1 recipe had its ingredient amounts separated out, so it counts on the shopping list now`
+    : `${quantitiesFound} recipes had their ingredient amounts separated out, so they count on the shopping list now`);
+  if (reread) bits.push(reread === 1
+    ? `1 recipe was read through and sorted out`
+    : `${reread} recipes were read through and sorted out`);
   if (junkDropped) bits.push(junkDropped === 1
     ? `1 thing that wasn't really an ingredient was removed`
     : `${junkDropped} things that weren't really ingredients were removed`);
@@ -4497,6 +4564,35 @@ function tidyAisle(raw) {
 /* Keep an ingredient only if it looks like food. Importers occasionally scrape
    a page's navigation into the ingredient list, which is where entries like
    "news" and "subscribe" come from. */
+/* Pull "2 lbs stew meat" apart into an amount, a unit and a name.
+   Recipes brought in from a link arrive as one line per ingredient with no
+   amount separated out, which leaves the shopping list unable to add anything
+   up. This is deterministic and costs nothing. */
+function splitIngredientLine(line) {
+  const t = stripBullet(tidySpacing(line));
+  if (!t) return { amount: '', unit: '', name: '' };
+  const m = t.match(/^((?:\d+\s+\d+\s*\/\s*\d+)|(?:\d+\s*\/\s*\d+)|(?:\d*\.?\d+)|[½¼¾⅓⅔⅛⅜⅝⅞])\s*(?:[-–to]+\s*(?:\d*\.?\d+|\d+\s*\/\s*\d+)\s*)?(.*)$/i);
+  if (!m) return { amount: '', unit: '', name: t };
+  const amount = m[1].trim();
+  let rest = (m[2] || '').trim();
+  const firstWord = (rest.split(/\s+/)[0] || '').replace(/[.,]$/, '');
+  if (firstWord && Object.prototype.hasOwnProperty.call(UNIT_ALIASES, firstWord.toLowerCase())) {
+    rest = rest.slice(rest.indexOf(firstWord) + firstWord.length).trim()
+      .replace(/^[.,]\s*/, '').replace(/^of\s+/i, '');
+    return { amount, unit: firstWord, name: rest || t };
+  }
+  return { amount, unit: '', name: rest || t };
+}
+
+/* Does this recipe's ingredient list have no quantities at all? That's the
+   signature of a line-per-ingredient import. */
+function ingredientsUnsplit(ings) {
+  const list = (ings || []).filter(i => i && i.name);
+  if (list.length < 2) return false;
+  return list.every(i => !String(i.amount || '').trim()) &&
+         list.some(i => /\d/.test(i.name));
+}
+
 function keepIngredient(i) {
   if (!i || !i.name) return false;
   const raw = String(i.name).toLowerCase().trim();
