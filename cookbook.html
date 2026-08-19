@@ -1769,7 +1769,7 @@ async function importFromUrl() {
         if (g && g.ingredients.length >= 3) { g.roughParse = true; return g; }
         return null;
       })()
-    : parseRecipeFromHtml(html, url);
+    : parseRecipeFromHtml(html, url, { allowRoughRead: true });
   if (!recipe) {
     status.innerHTML = `
       <div class="error">
@@ -1790,7 +1790,12 @@ async function importFromUrl() {
   setTimeout(() => showRecipeDetail(recipe.id), 700);
 }
 
-function parseRecipeFromHtml(html, sourceUrl) {
+/* `allowRoughRead` is off unless the person explicitly asked to import from a
+   link. Reading a page's visible text is a last resort that inevitably picks
+   up some of the website around the recipe, so it must never happen silently
+   behind a recipe that already has proper data. */
+function parseRecipeFromHtml(html, sourceUrl, opts) {
+  const allowRoughRead = !!(opts && opts.allowRoughRead);
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, 'text/html');
 
@@ -1808,8 +1813,10 @@ function parseRecipeFromHtml(html, sourceUrl) {
   const micro = microdataToRecipe(doc);
   if (micro) return micro;
 
-  // 3. Nothing structured. Fall back to reading the visible text the same way
-  //    the Paste Text tab does — imperfect, but far better than giving up.
+  // 3. Nothing structured. Only when the person asked for this link directly:
+  //    read the visible text the way the Paste Text tab does. Imperfect, and
+  //    flagged as such, but better than refusing the import outright.
+  if (!allowRoughRead) return null;
   const text = readableTextFrom(doc);
   if (text) {
     const guessed = parsePastedRecipe(text);
@@ -4407,8 +4414,10 @@ async function fetchSourceInstructions(url) {
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       const html = await proxy.extract(resp);
       if (!html || html.length < 100) throw new Error('too short');
+      // Structured data only. This runs behind recipes that already have
+      // perfectly good steps, so it must be certain before overriding them.
       const parsed = parseRecipeFromHtml(html, url);
-      // Page loaded: if it has no recipe markup, other proxies won't help.
+      // Page loaded but has no proper recipe data — other routes won't help.
       return (parsed && parsed.instructions && parsed.instructions.length) ? parsed.instructions : null;
     } catch (e) { /* try next proxy */ }
   }
