@@ -3642,7 +3642,22 @@ async function refreshInvites() {
 
 /* ---------- Auth actions ---------- */
 
-function authFriendlyError(e) {
+/* The last sign-in problem, kept so it can be shown on demand. There's no way
+   to look at a phone's console, so without this a setup problem can only be
+   guessed at. */
+let _lastAuthProblem = null;
+
+function noteAuthProblem(e, method) {
+  _lastAuthProblem = {
+    code: (e && e.code) || 'unknown',
+    message: (e && e.message) || String(e || ''),
+    method: method || 'email',
+    at: new Date().toLocaleTimeString(),
+  };
+}
+
+function authFriendlyError(e, method) {
+  noteAuthProblem(e, method);
   const code = (e && e.code) || '';
   const map = {
     'auth/invalid-email': 'That email address doesn\'t look right.',
@@ -3654,10 +3669,19 @@ function authFriendlyError(e) {
     'auth/weak-password': 'Password needs to be at least 6 characters.',
     'auth/too-many-requests': 'Too many attempts. Wait a minute and try again.',
     'auth/network-request-failed': 'Network problem — check your connection and try again.',
-    'auth/operation-not-allowed': 'This way of signing in hasn\'t been switched on yet.',
+    // 'auth/operation-not-allowed' is handled below, where we know which
+    // button was pressed and can name it.
     'auth/invalid-email': 'That doesn\'t look like an email address.',
     'auth/user-disabled': 'That account has been turned off.',
   };
+  if (code === 'auth/operation-not-allowed') {
+    // The provider is switched off for the app. Naming the method matters:
+    // it tells whoever set the app up exactly which one to turn on, and tells
+    // the person in front of it what else to try.
+    return method === 'apple'
+      ? 'Signing in with Apple hasn\'t been switched on for this app yet. Try creating an account with your email address instead.'
+      : 'Signing up with an email address hasn\'t been switched on for this app yet. Try the Sign in with Apple button instead.';
+  }
   if (map[code]) return map[code];
   // Anything unexpected: the detail goes to the console for whoever maintains
   // the app, and the person gets something they can act on.
@@ -3669,13 +3693,36 @@ function authFriendlyError(e) {
 // person did, so the details go to the console and they get a plain message.
 function appleError(e) {
   console.warn('Apple sign-in failed:', (e && e.code) || '', e);
+  noteAuthProblem(e, 'apple');
   if (e && e.code === 'auth/popup-closed-by-user') return 'Sign-in was cancelled.';
+  if (e && e.code === 'auth/operation-not-allowed') return authFriendlyError(e, 'apple');
   return 'Couldn\'t sign in with Apple just now. Try again, or use your email and password instead.';
 }
 
 function showAuthStatus(msg, isError) {
   const el = document.getElementById('authStatus');
-  if (el) el.innerHTML = msg ? `<div class="${isError ? 'error' : 'notice'}" style="margin:10px 0 0;">${escapeHtml(msg)}</div>` : '';
+  if (!el) return;
+  if (!msg) { el.innerHTML = ''; return; }
+  el.innerHTML = `<div class="${isError ? 'error' : 'notice'}" style="margin:10px 0 0;">${escapeHtml(msg)}</div>`
+    + (isError ? authProblemDetails() : '');
+}
+
+/* Tucked behind a tap, so nobody has to look at it, but it's there when
+   someone needs to work out what's wrong. */
+function authProblemDetails() {
+  if (!_lastAuthProblem) return '';
+  const p = _lastAuthProblem;
+  return `
+    <details style="margin-top:8px;">
+      <summary style="cursor:pointer; font-size:12px; color:var(--ink-soft);">
+        Details, if you're the one who set this app up
+      </summary>
+      <div style="font-size:12px; color:var(--ink-soft); margin-top:6px; line-height:1.7; overflow-wrap:anywhere;">
+        Method: ${escapeHtml(p.method === 'apple' ? 'Sign in with Apple' : 'Email and password')}<br>
+        Reference: <code>${escapeHtml(p.code)}</code><br>
+        Time: ${escapeHtml(p.at)}
+      </div>
+    </details>`;
 }
 
 function setAuthMode(mode) {
@@ -3705,7 +3752,7 @@ async function submitAuth() {
     }
     // onAuthStateChanged re-renders the modal
   } catch (e) {
-    showAuthStatus(authFriendlyError(e), true);
+    showAuthStatus(authFriendlyError(e, 'email'), true);
   }
 }
 
@@ -3716,7 +3763,7 @@ async function authForgotPassword() {
     await _auth.sendPasswordResetEmail(email);
     showAuthStatus('Password reset email sent to ' + email + '. Check your inbox.');
   } catch (e) {
-    showAuthStatus(authFriendlyError(e), true);
+    showAuthStatus(authFriendlyError(e, 'email'), true);
   }
 }
 
@@ -3763,7 +3810,8 @@ async function signInWithApple() {
 async function signInWithAppleNative() {
   const plugin = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.SignInWithApple;
   if (!plugin) {
-    showAuthStatus('Apple Sign In isn\'t available in this build. Run "npm install && npx cap sync ios" in my-cookbook-ios and rebuild.', true);
+    console.warn('Apple sign-in plugin missing from this build.');
+    showAuthStatus('Sign in with Apple isn\'t available in this version of the app. Use your email address instead.', true);
     return;
   }
   try {
